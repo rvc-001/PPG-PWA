@@ -54,9 +54,15 @@ export default function HistoryTab() {
     const {start, end} = getTimestamps();
     const csv = generateMIMICCSV(selectedSession, start, end);
     const url = URL.createObjectURL(new Blob([csv], {type: 'text/csv'}));
+    
+    // Construct filename: patientid_patientname.csv
+    // Handle cases where fields might be empty
+    const pid = selectedSession.patientId ? selectedSession.patientId.replace(/[^a-z0-9]/gi, '') : 'anon';
+    const pname = selectedSession.patientName ? selectedSession.patientName.replace(/[^a-z0-9]/gi, '') : 'user';
+    
     const a = document.createElement('a');
     a.href = url;
-    a.download = `MIMIC_${selectedSession.patientId}_${new Date().toISOString().slice(0,10)}.csv`;
+    a.download = `${pid}_${pname}.csv`; // Requested Format
     a.click();
   };
 
@@ -65,8 +71,7 @@ export default function HistoryTab() {
     const { start, end } = getTimestamps();
     const raw = selectedSession.rawSignal.filter(s => s.timestamp >= start && s.timestamp <= end).map(s => s.value);
     
-    // Call new robust filter without strict config object requirement
-    const filtered = applyFilterToArray(raw, selectedSession.filterConfig);
+    const filtered = applyFilterToArray(raw);
     
     return { rawSlice: raw, filteredSlice: filtered };
   }, [selectedSession, startMin, startSec, endMin, endSec]);

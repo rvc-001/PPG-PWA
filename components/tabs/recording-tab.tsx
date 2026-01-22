@@ -38,18 +38,15 @@ export default function RecordingTab() {
   useEffect(() => {
     filterRef.current = new RealTimeFilter();
     
-    // Auto-init camera logic
     const initCamera = async () => {
       try {
         if (!rpPgRef.current) rpPgRef.current = new RPPGAcquisition(30);
         
-        // This will request Rear Camera + Torch
         const stream = await rpPgRef.current.requestCameraPermission();
         streamRef.current = stream;
         
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
-          // IMPORTANT: Must wait for loadedmetadata to play on some mobile
           videoRef.current.onloadedmetadata = () => {
              videoRef.current?.play().catch(e => console.error("Play error:", e));
           };
@@ -109,11 +106,9 @@ export default function RecordingTab() {
       recordedSamplesRef.current.push({ timestamp: Date.now(), value: rawVal });
       setSampleCount(c => {
          const newCount = c + 1;
-         // Live BP (every ~2s)
          if (newCount % 60 === 0) {
             const recent = recordedSamplesRef.current.slice(-150).map(s => s.value);
             const tempFilter = new RealTimeFilter();
-            // Fast warmup
             for(let i=0; i<5; i++) tempFilter.process(recent[0]);
             const cleanRecent = recent.map(v => tempFilter.process(v));
             
@@ -135,7 +130,6 @@ export default function RecordingTab() {
     
     const fullData = recordedSamplesRef.current.map(s => s.value);
     
-    // Final high-quality processing
     const filter = new RealTimeFilter();
     const cleanSignal = fullData.map(v => filter.process(v));
     
@@ -172,16 +166,14 @@ export default function RecordingTab() {
   return (
     <div className="w-full flex flex-col bg-background min-h-screen">
       <div className="relative bg-black/80 aspect-video flex items-center justify-center overflow-hidden">
-        {/* VIDEO ELEMENT: Essential attributes for iOS/Mobile */}
         <video 
             ref={videoRef} 
             autoPlay 
-            playsInline // CRITICAL FOR IOS
-            muted // CRITICAL FOR AUTOPLAY
+            playsInline 
+            muted 
             className={`w-full h-full object-cover ${cameraPermission === 'denied' ? 'hidden' : ''}`} 
         />
         
-        {/* Permission / HTTPS Error Overlay */}
         {cameraPermission === 'denied' && (
            <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/90 p-6 text-center">
              <AlertTriangle className="w-12 h-12 text-yellow-500 mb-2" />
@@ -211,7 +203,8 @@ export default function RecordingTab() {
             <Play className="w-6 h-6 fill-current" /> START ACQUISITION
           </button>
         ) : (
-          <button onClick={handleStopRecording} className="w-full flex items-center justify-center gap-2 px-6 py-4 bg-destructive text-destructive-foreground rounded-xl font-bold hover:bg-destructive/90 animate-pulse">
+          <button onClick={handleStopRecording} className="w-full flex items-center justify-center gap-2 px-6 py-4 bg-destructive text-destructive-foreground rounded-xl font-bold hover:bg-destructive/90 transition-colors">
+            {/* Removed animate-pulse here */}
             <Pause className="w-6 h-6 fill-current" /> STOP & ANALYZE
           </button>
         )}
