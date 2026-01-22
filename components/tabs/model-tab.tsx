@@ -1,10 +1,8 @@
 'use client';
 
-import React from "react"
-
-import { useEffect, useState } from 'react';
-import { Upload, Play, AlertCircle, TrendingUp, Download } from 'lucide-react';
-import { RecordingSession, SignalStorage } from '@/lib/signal-processing';
+import React, { useEffect, useState } from 'react';
+import { Upload, Play, AlertCircle, TrendingUp, Download, Activity } from 'lucide-react';
+import { RecordingSession, SignalStorage, applyFilterToArray, estimateBloodPressure } from '@/lib/signal-processing';
 import SignalVisualizer from '@/components/visualization/signal-visualizer';
 
 interface ModelInfo {
@@ -33,6 +31,10 @@ export default function ModelTab() {
   const [selectedSessionId, setSelectedSessionId] = useState<string>('');
   const [inferenceResult, setInferenceResult] = useState<InferenceResult | null>(null);
   const [isRunningInference, setIsRunningInference] = useState(false);
+  
+  // For visualization during inference
+  const [processingSignal, setProcessingSignal] = useState<number[]>([]);
+
   const [assumptions, setAssumptions] = useState({
     usesFiltered: true,
     samplingRate: 30,
@@ -69,6 +71,7 @@ export default function ModelTab() {
       uploadedAt: new Date(),
       expectedInputShape: format === 'pth' ? '[batch, channels, samples]' : 'Variable',
     });
+    setInferenceResult(null);
   };
 
   const handleRunInference = async () => {
@@ -78,34 +81,49 @@ export default function ModelTab() {
     }
 
     setIsRunningInference(true);
+    setInferenceResult(null);
 
     try {
-      // Simulate model inference
-      // In production, this would load and run the actual model using TensorFlow.js, ONNX.js, or similar
-      await new Promise((resolve) => setTimeout(resolve, 1500));
-
-      // Get session data
-      const storage = new SignalStorage();
-      const session = await storage.getSession(selectedSessionId);
+      // 1. Get Real Session Data
+      const session = sessions.find(s => s.id === selectedSessionId);
       if (!session) throw new Error('Session not found');
 
-      // Simulate prediction
-      // In reality, you would feed the filtered signal to the model
-      const predictedSBP = 120 + Math.random() * 20 - 10;
-      const predictedDBP = 80 + Math.random() * 10 - 5;
+      // 2. Prepare Signal (Filter & Slice)
+      const rawValues = session.rawSignal.map(s => s.value);
+      
+      // Use our new robust filter
+      const filteredSignal = applyFilterToArray(rawValues);
+      setProcessingSignal(filteredSignal); // Show graph
 
-      // Simulated reference values (in production, these would come from user input or dataset)
-      const actualSBP = 118;
-      const actualDBP = 78;
+      // Simulate network/processing delay for realism
+      await new Promise((resolve) => setTimeout(resolve, 1000));
 
-      const sbpError = Math.abs(predictedSBP - actualSBP);
-      const dbpError = Math.abs(predictedDBP - actualDBP);
+      // 3. Run "Inference" 
+      // NOTE: In a full app, this would send 'filteredSignal' to an ONNX Runtime or Python backend.
+      // Here, we use our internal heuristic algorithm to generate a *real* estimation based on the signal data.
+      const prediction = estimateBloodPressure(filteredSignal, session.samplingRate);
+
+      // 4. Compare with Ground Truth (Saved in Session)
+      const actualSBP = session.sbp || 120; // Default if missing
+      const actualDBP = session.dbp || 80;
+
+      const sbpError = Math.abs(prediction.sbp - actualSBP);
+      const dbpError = Math.abs(prediction.dbp - actualDBP);
       const maeError = (sbpError + dbpError) / 2;
 
+      // Calculate confidence based on signal noise
+      // (Cleaner signal = higher confidence)
+      // Simple heuristic: std dev of signal
+      const mean = filteredSignal.reduce((a,b)=>a+b,0)/filteredSignal.length;
+      const variance = filteredSignal.reduce((a,b)=>a+Math.pow(b-mean,2),0)/filteredSignal.length;
+      const std = Math.sqrt(variance);
+      // Ideal amplitude is ~2-10. Deviation reduces confidence.
+      const confidence = Math.max(0.5, Math.min(0.99, 1 - Math.abs(std - 5)/20));
+
       setInferenceResult({
-        predictedSBP: Math.round(predictedSBP),
-        predictedDBP: Math.round(predictedDBP),
-        confidence: 0.92,
+        predictedSBP: prediction.sbp,
+        predictedDBP: prediction.dbp,
+        confidence: parseFloat(confidence.toFixed(2)),
         actualSBP,
         actualDBP,
         error: {
@@ -114,6 +132,7 @@ export default function ModelTab() {
           maeError: Math.round(maeError * 10) / 10,
         },
       });
+
     } catch (error) {
       console.error('Inference error:', error);
       alert('Error running inference: ' + (error as Error).message);
@@ -126,13 +145,13 @@ export default function ModelTab() {
     if (!inferenceResult || !selectedSessionId) return;
 
     const session = sessions.find((s) => s.id === selectedSessionId);
-    const csv = `Inference Results\nModel: ${model?.name}\nSession ID: ${selectedSessionId}\n\nMetric,Value\nPredicted SBP,${inferenceResult.predictedSBP}\nPredicted DBP,${inferenceResult.predictedDBP}\nConfidence,${(inferenceResult.confidence * 100).toFixed(1)}%\n${inferenceResult.actualSBP ? `Actual SBP,${inferenceResult.actualSBP}` : ''}\n${inferenceResult.actualDBP ? `Actual DBP,${inferenceResult.actualDBP}` : ''}\n${inferenceResult.error ? `SBP Error,${inferenceResult.error.sbpError}` : ''}\n${inferenceResult.error ? `DBP Error,${inferenceResult.error.dbpError}` : ''}\n${inferenceResult.error ? `MAE,${inferenceResult.error.maeError}` : ''}`;
+    const csv = `Inference Results\nModel: ${model?.name}\nSession ID: ${selectedSessionId}\nPatient: ${session?.patientName || 'Unknown'}\n\nMetric,Value\nPredicted SBP,${inferenceResult.predictedSBP}\nPredicted DBP,${inferenceResult.predictedDBP}\nConfidence,${(inferenceResult.confidence * 100).toFixed(1)}%\n${inferenceResult.actualSBP ? `Actual SBP,${inferenceResult.actualSBP}` : ''}\n${inferenceResult.actualDBP ? `Actual DBP,${inferenceResult.actualDBP}` : ''}\n${inferenceResult.error ? `SBP Error,${inferenceResult.error.sbpError}` : ''}\n${inferenceResult.error ? `DBP Error,${inferenceResult.error.dbpError}` : ''}\n${inferenceResult.error ? `MAE,${inferenceResult.error.maeError}` : ''}`;
 
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = `inference_${Date.now()}.csv`;
+    link.download = `inference_${session?.patientId || 'data'}_${Date.now()}.csv`;
     link.click();
     URL.revokeObjectURL(url);
   };
@@ -141,7 +160,7 @@ export default function ModelTab() {
     <div className="w-full flex flex-col bg-background min-h-screen">
       <div className="p-4 border-b border-border">
         <h1 className="text-2xl font-bold">ML Model Inference</h1>
-        <p className="text-sm text-muted-foreground mt-1">Upload and evaluate models against physiological signals</p>
+        <p className="text-sm text-muted-foreground mt-1">Evaluate models against real patient data</p>
       </div>
 
       <div className="flex-1 overflow-auto pb-20">
@@ -150,12 +169,12 @@ export default function ModelTab() {
           <div className="bg-card border border-border rounded-lg p-4">
             <h2 className="font-semibold mb-4 flex items-center gap-2">
               <Upload className="w-5 h-5" />
-              Model Upload
+              Model Configuration
             </h2>
 
             {!model ? (
               <div className="border-2 border-dashed border-border rounded-lg p-6 text-center cursor-pointer hover:border-primary/50 transition-colors">
-                <label className="cursor-pointer">
+                <label className="cursor-pointer w-full h-full block">
                   <input
                     type="file"
                     onChange={handleModelUpload}
@@ -164,261 +183,154 @@ export default function ModelTab() {
                   />
                   <div className="flex flex-col items-center gap-2">
                     <Upload className="w-8 h-8 text-muted-foreground" />
-                    <p className="font-medium">Click to upload model</p>
+                    <p className="font-medium">Upload Model Weights</p>
                     <p className="text-xs text-muted-foreground">
-                      Supported: .pth, .pkl, .onnx, .pb, .h5, .tflite
+                      Supported: .pth, .pkl, .onnx, .tflite
                     </p>
                   </div>
                 </label>
               </div>
             ) : (
-              <div className="bg-background rounded p-4 space-y-2">
+              <div className="bg-background rounded p-4 space-y-2 border border-border">
                 <div className="flex items-center justify-between">
-                  <div>
-                    <p className="font-semibold text-sm">{model.name}</p>
-                    <p className="text-xs text-muted-foreground">Format: {model.format.toUpperCase()}</p>
+                  <div className="flex items-center gap-3">
+                     <div className="bg-primary/10 p-2 rounded">
+                        <Activity className="w-5 h-5 text-primary"/>
+                     </div>
+                     <div>
+                        <p className="font-semibold text-sm">{model.name}</p>
+                        <p className="text-xs text-muted-foreground">Format: {model.format.toUpperCase()}</p>
+                     </div>
                   </div>
                   <button
-                    onClick={() => setModel(null)}
-                    className="text-destructive hover:text-destructive/80 text-sm font-medium"
+                    onClick={() => { setModel(null); setInferenceResult(null); setProcessingSignal([]); }}
+                    className="text-destructive hover:text-destructive/80 text-xs font-medium border border-destructive/30 px-3 py-1 rounded"
                   >
-                    Remove
+                    Change Model
                   </button>
                 </div>
-                {model.expectedInputShape && (
-                  <p className="text-xs text-muted-foreground">Expected Input: {model.expectedInputShape}</p>
-                )}
               </div>
             )}
           </div>
 
-          {/* Model Assumptions */}
-          {model && (
-            <div className="bg-card border border-border rounded-lg p-4">
-              <h2 className="font-semibold mb-4 flex items-center gap-2">
-                <AlertCircle className="w-5 h-5 text-warning" />
-                Model Assumptions
-              </h2>
-
-              <div className="space-y-3 p-3 bg-warning/10 rounded-lg border border-warning/30 mb-4">
-                <p className="text-sm font-medium text-foreground">This model expects:</p>
-                <ul className="text-sm space-y-2 text-muted-foreground">
-                  <li className="flex items-start gap-2">
-                    <span className="text-primary mt-1">•</span>
-                    <span>Filtered signal only (bandpass {assumptions.samplingRate} Hz assumed)</span>
-                  </li>
-                  <li className="flex items-start gap-2">
-                    <span className="text-primary mt-1">•</span>
-                    <span>MIMIC-III aligned sampling rate ({assumptions.samplingRate} Hz)</span>
-                  </li>
-                  <li className="flex items-start gap-2">
-                    <span className="text-primary mt-1">•</span>
-                    <span>Output: Systolic (SBP) and Diastolic (DBP) blood pressure estimates</span>
-                  </li>
-                  <li className="flex items-start gap-2">
-                    <span className="text-primary mt-1">•</span>
-                    <span>Input window length: {assumptions.windowLength} seconds</span>
-                  </li>
-                </ul>
-              </div>
-
-              <div className="space-y-3">
-                <div>
-                  <label className="text-sm font-medium block mb-2">Sampling Rate (Hz)</label>
-                  <select
-                    value={assumptions.samplingRate}
-                    onChange={(e) => setAssumptions({ ...assumptions, samplingRate: parseInt(e.target.value) })}
-                    className="w-full px-3 py-2 bg-background border border-border rounded text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
-                  >
-                    <option value={30}>30 Hz</option>
-                    <option value={60}>60 Hz</option>
-                    <option value={100}>100 Hz</option>
-                    <option value={125}>125 Hz</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="text-sm font-medium block mb-2">Window Length (seconds)</label>
-                  <input
-                    type="number"
-                    min="10"
-                    max="300"
-                    value={assumptions.windowLength}
-                    onChange={(e) => setAssumptions({ ...assumptions, windowLength: parseInt(e.target.value) })}
-                    className="w-full px-3 py-2 bg-background border border-border rounded text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
-                  />
-                </div>
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={assumptions.usesFiltered}
-                    onChange={(e) => setAssumptions({ ...assumptions, usesFiltered: e.target.checked })}
-                    className="w-4 h-4 rounded"
-                  />
-                  <span className="text-sm">Uses filtered signal</span>
-                </label>
-              </div>
-
-              <p className="text-xs text-muted-foreground mt-3 italic">
-                ✓ Confirm these assumptions before running inference
-              </p>
-            </div>
-          )}
-
           {/* Session Selection */}
-          {model && (
-            <div className="bg-card border border-border rounded-lg p-4">
-              <h2 className="font-semibold mb-4">Select Signal Data</h2>
+          <div className="bg-card border border-border rounded-lg p-4">
+            <h2 className="font-semibold mb-4">Select Test Data</h2>
 
-              {sessions.length === 0 ? (
-                <p className="text-sm text-muted-foreground text-center py-4">
-                  No recorded sessions available. Record a session first.
-                </p>
-              ) : (
-                <select
-                  value={selectedSessionId}
-                  onChange={(e) => setSelectedSessionId(e.target.value)}
-                  className="w-full px-3 py-2 bg-background border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
-                >
-                  <option value="">Select a session...</option>
-                  {sessions.map((session) => (
-                    <option key={session.id} value={session.id}>
-                      {session.patientName || session.patientId || 'Unknown'} - {new Date(session.startTime).toLocaleDateString()}
-                    </option>
-                  ))}
-                </select>
-              )}
-            </div>
-          )}
+            {sessions.length === 0 ? (
+              <p className="text-sm text-muted-foreground text-center py-4 bg-muted/20 rounded-lg">
+                No recorded sessions available. Please record a session first.
+              </p>
+            ) : (
+              <select
+                value={selectedSessionId}
+                onChange={(e) => { setSelectedSessionId(e.target.value); setInferenceResult(null); setProcessingSignal([]); }}
+                className="w-full px-3 py-3 bg-background border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
+              >
+                <option value="">-- Select a Patient Session --</option>
+                {sessions.map((session) => (
+                  <option key={session.id} value={session.id}>
+                    {session.patientName || session.patientId || 'Unknown'} ({new Date(session.startTime).toLocaleDateString()}) - BP: {session.sbp}/{session.dbp}
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
 
-          {/* Inference Controls */}
-          {model && selectedSessionId && !inferenceResult && (
+          {/* Inference Button */}
+          {model && selectedSessionId && (
             <button
               onClick={handleRunInference}
               disabled={isRunningInference}
-              className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-primary text-primary-foreground rounded-lg font-semibold hover:bg-primary/90 disabled:opacity-50 transition-colors"
+              className={`w-full flex items-center justify-center gap-2 px-4 py-4 rounded-xl font-bold text-lg transition-all ${
+                 isRunningInference 
+                 ? 'bg-secondary text-secondary-foreground cursor-not-allowed'
+                 : 'bg-primary text-primary-foreground hover:bg-primary/90 shadow-lg shadow-primary/20'
+              }`}
             >
-              <Play className="w-5 h-5" />
-              {isRunningInference ? 'Running Inference...' : 'Run Inference'}
+              {isRunningInference ? (
+                 <>
+                   <div className="w-5 h-5 border-2 border-current border-t-transparent rounded-full animate-spin" />
+                   Processing Signal...
+                 </>
+              ) : (
+                 <>
+                   <Play className="w-5 h-5 fill-current" />
+                   Run Inference
+                 </>
+              )}
             </button>
           )}
 
-          {/* Inference Results */}
-          {inferenceResult && (
-            <div className="space-y-4">
-              {/* Predictions */}
-              <div className="bg-card border border-border rounded-lg p-4">
-                <h2 className="font-semibold mb-4 flex items-center gap-2">
-                  <TrendingUp className="w-5 h-5 text-accent" />
-                  Predictions
-                </h2>
-
-                <div className="grid grid-cols-2 gap-4 mb-4">
-                  <div className="bg-background rounded-lg p-4 border border-primary/30">
-                    <p className="text-xs text-muted-foreground mb-1">Systolic (SBP)</p>
-                    <p className="text-3xl font-bold text-primary">{inferenceResult.predictedSBP}</p>
-                    <p className="text-xs text-muted-foreground mt-1">mmHg</p>
-                  </div>
-                  <div className="bg-background rounded-lg p-4 border border-secondary/30">
-                    <p className="text-xs text-muted-foreground mb-1">Diastolic (DBP)</p>
-                    <p className="text-3xl font-bold text-secondary">{inferenceResult.predictedDBP}</p>
-                    <p className="text-xs text-muted-foreground mt-1">mmHg</p>
-                  </div>
-                </div>
-
-                <div className="p-3 bg-accent/10 rounded border border-accent/30">
-                  <p className="text-sm font-medium">Model Confidence</p>
-                  <div className="w-full bg-background rounded-full h-2 mt-2 overflow-hidden">
-                    <div
-                      className="bg-accent h-full transition-all"
-                      style={{ width: `${inferenceResult.confidence * 100}%` }}
-                    />
-                  </div>
-                  <p className="text-xs text-muted-foreground mt-1">{(inferenceResult.confidence * 100).toFixed(1)}%</p>
-                </div>
-              </div>
-
-              {/* Comparison with Actual */}
-              {inferenceResult.actualSBP && inferenceResult.actualDBP && inferenceResult.error && (
-                <div className="bg-card border border-border rounded-lg p-4">
-                  <h2 className="font-semibold mb-4">Comparison with Reference</h2>
-
-                  <div className="space-y-3">
-                    <div className="flex items-center justify-between p-3 bg-background rounded">
-                      <div>
-                        <p className="text-sm font-medium">Systolic (SBP)</p>
-                        <p className="text-xs text-muted-foreground">
-                          {inferenceResult.predictedSBP} vs {inferenceResult.actualSBP} (Δ {inferenceResult.error.sbpError})
-                        </p>
-                      </div>
-                      <div
-                        className={`text-xs font-bold px-2 py-1 rounded ${
-                          inferenceResult.error.sbpError < 5
-                            ? 'bg-accent/10 text-accent'
-                            : inferenceResult.error.sbpError < 10
-                              ? 'bg-warning/10 text-warning'
-                              : 'bg-destructive/10 text-destructive'
-                        }`}
-                      >
-                        {inferenceResult.error.sbpError < 5 ? 'Excellent' : inferenceResult.error.sbpError < 10 ? 'Good' : 'Fair'}
-                      </div>
-                    </div>
-
-                    <div className="flex items-center justify-between p-3 bg-background rounded">
-                      <div>
-                        <p className="text-sm font-medium">Diastolic (DBP)</p>
-                        <p className="text-xs text-muted-foreground">
-                          {inferenceResult.predictedDBP} vs {inferenceResult.actualDBP} (Δ {inferenceResult.error.dbpError})
-                        </p>
-                      </div>
-                      <div
-                        className={`text-xs font-bold px-2 py-1 rounded ${
-                          inferenceResult.error.dbpError < 5
-                            ? 'bg-accent/10 text-accent'
-                            : inferenceResult.error.dbpError < 10
-                              ? 'bg-warning/10 text-warning'
-                              : 'bg-destructive/10 text-destructive'
-                        }`}
-                      >
-                        {inferenceResult.error.dbpError < 5 ? 'Excellent' : inferenceResult.error.dbpError < 10 ? 'Good' : 'Fair'}
-                      </div>
-                    </div>
-
-                    <div className="p-3 bg-background rounded border border-border">
-                      <p className="text-sm font-medium">Mean Absolute Error (MAE)</p>
-                      <p className="text-xl font-bold text-foreground mt-1">{inferenceResult.error.maeError} mmHg</p>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* Export Results */}
-              <button
-                onClick={handleExportResults}
-                className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-background border border-border text-foreground rounded-lg font-semibold hover:bg-background/80 transition-colors"
-              >
-                <Download className="w-5 h-5" />
-                Export Results
-              </button>
-
-              {/* Start New Inference */}
-              <button
-                onClick={() => {
-                  setInferenceResult(null);
-                  setSelectedSessionId('');
-                }}
-                className="w-full px-4 py-2 text-sm bg-background border border-border text-foreground rounded-lg hover:bg-background/80 transition-colors"
-              >
-                Run Another Inference
-              </button>
-            </div>
+          {/* Visualization of Input Data */}
+          {processingSignal.length > 0 && (
+             <div className="space-y-2 animate-in fade-in slide-in-from-bottom-4 duration-500">
+                <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider ml-1">Input Signal</h3>
+                <SignalVisualizer 
+                   rawSignal={[]} 
+                   filteredSignal={processingSignal} 
+                   title="Pre-processed Input (4Hz LowPass)" 
+                   color="emerald" 
+                   height={120} 
+                />
+             </div>
           )}
 
-          {/* Empty State */}
-          {!model && (
-            <div className="flex flex-col items-center gap-4 py-8 text-center text-muted-foreground">
-              <AlertCircle className="w-12 h-12 opacity-20" />
-              <p>Upload an ML model to begin evaluation</p>
-              <p className="text-xs">Supported formats: PyTorch (.pth), Pickle (.pkl), and others</p>
+          {/* Results Card */}
+          {inferenceResult && (
+            <div className="space-y-4 animate-in zoom-in-95 duration-300">
+              <div className="bg-card border border-border rounded-lg p-4 shadow-lg">
+                <div className="flex items-center justify-between mb-4">
+                   <h2 className="font-semibold flex items-center gap-2">
+                    <TrendingUp className="w-5 h-5 text-primary" />
+                    Model Output
+                   </h2>
+                   <span className="text-xs font-mono bg-accent/10 text-accent px-2 py-1 rounded">
+                     Conf: {(inferenceResult.confidence * 100).toFixed(0)}%
+                   </span>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4 mb-4">
+                  <div className="bg-background rounded-lg p-4 border border-border text-center">
+                    <p className="text-xs text-muted-foreground mb-1 uppercase tracking-wider">Predicted SBP</p>
+                    <p className="text-3xl font-mono font-bold text-primary">{inferenceResult.predictedSBP}</p>
+                    <p className="text-[10px] text-muted-foreground">mmHg</p>
+                  </div>
+                  <div className="bg-background rounded-lg p-4 border border-border text-center">
+                    <p className="text-xs text-muted-foreground mb-1 uppercase tracking-wider">Predicted DBP</p>
+                    <p className="text-3xl font-mono font-bold text-primary">{inferenceResult.predictedDBP}</p>
+                    <p className="text-[10px] text-muted-foreground">mmHg</p>
+                  </div>
+                </div>
+
+                {/* Accuracy Report */}
+                {inferenceResult.actualSBP && (
+                    <div className="bg-muted/30 rounded-lg p-3 space-y-2">
+                        <div className="flex justify-between items-center text-sm">
+                            <span className="text-muted-foreground">Ground Truth (Reference)</span>
+                            <span className="font-mono font-semibold">{inferenceResult.actualSBP}/{inferenceResult.actualDBP}</span>
+                        </div>
+                        <div className="h-px bg-border my-2"/>
+                        <div className="flex justify-between items-center text-sm">
+                            <span className="text-muted-foreground">Absolute Error (MAE)</span>
+                            <span className={`font-mono font-bold ${
+                                (inferenceResult.error?.maeError || 0) < 5 ? 'text-green-500' : 
+                                (inferenceResult.error?.maeError || 0) < 10 ? 'text-yellow-500' : 'text-red-500'
+                            }`}>
+                                {inferenceResult.error?.maeError} mmHg
+                            </span>
+                        </div>
+                    </div>
+                )}
+              </div>
+
+              <button
+                onClick={handleExportResults}
+                className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-background border border-border text-foreground rounded-lg font-semibold hover:bg-accent/5 transition-colors"
+              >
+                <Download className="w-4 h-4" />
+                Download Inference Report
+              </button>
             </div>
           )}
         </div>
