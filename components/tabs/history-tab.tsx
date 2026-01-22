@@ -1,7 +1,7 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { RecordingSession, SignalStorage, generateMIMICCSV, calculateSignalStats } from '@/lib/signal-processing';
+import { useEffect, useState, useMemo } from 'react';
+import { RecordingSession, SignalStorage, generateMIMICCSV, calculateSignalStats, butterworthBandpass } from '@/lib/signal-processing';
 import SignalVisualizer from '@/components/visualization/signal-visualizer';
 import { Trash2, Download, Clock, User, ChevronLeft } from 'lucide-react';
 
@@ -12,8 +12,12 @@ export default function HistoryTab() {
   const [loading, setLoading] = useState(true);
   const [viewMode, setViewMode] = useState<ViewMode>('list');
   const [selectedSession, setSelectedSession] = useState<RecordingSession | null>(null);
-  const [clipStart, setClipStart] = useState<number | undefined>();
-  const [clipEnd, setClipEnd] = useState<number | undefined>();
+  
+  // Clip State (Minutes/Seconds)
+  const [startMin, setStartMin] = useState(0);
+  const [startSec, setStartSec] = useState(0);
+  const [endMin, setEndMin] = useState(0);
+  const [endSec, setEndSec] = useState(0);
 
   useEffect(() => {
     loadSessions();
@@ -35,32 +39,53 @@ export default function HistoryTab() {
 
   const handleSelectSession = (session: RecordingSession) => {
     setSelectedSession(session);
-    setClipStart(session.startTime);
-    setClipEnd(session.endTime);
+    // Init clip to full length
+    setStartMin(0);
+    setStartSec(0);
+    
+    const durationSec = Math.floor((session.endTime - session.startTime) / 1000);
+    setEndMin(Math.floor(durationSec / 60));
+    setEndSec(durationSec % 60);
+
     setViewMode('detail');
   };
 
   const handleDeleteSession = async (id: string) => {
     if (!window.confirm('Are you sure you want to delete this recording?')) return;
-
     try {
       const storage = new SignalStorage();
       await storage.deleteSession(id);
       setSessions(sessions.filter((s) => s.id !== id));
+      if (selectedSession?.id === id) {
+        setViewMode('list');
+        setSelectedSession(null);
+      }
     } catch (error) {
       console.error('Error deleting session:', error);
     }
   };
 
+  // Get absolute timestamps from Min/Sec inputs
+  const getClipTimestamps = () => {
+    if (!selectedSession) return { start: 0, end: 0 };
+    const startOffset = (startMin * 60 + startSec) * 1000;
+    const endOffset = (endMin * 60 + endSec) * 1000;
+    return {
+      start: selectedSession.startTime + startOffset,
+      end: selectedSession.startTime + endOffset
+    };
+  };
+
   const handleExportSession = () => {
     if (!selectedSession) return;
+    const { start, end } = getClipTimestamps();
 
-    const csv = generateMIMICCSV(selectedSession, clipStart, clipEnd);
+    const csv = generateMIMICCSV(selectedSession, start, end);
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement('a');
     const url = URL.createObjectURL(blob);
 
-    const filename = `signal_${selectedSession.patientId || selectedSession.patientName || 'export'}_${new Date(selectedSession.startTime).toISOString().slice(0, 10)}.csv`;
+    const filename = `MIMIC_${selectedSession.patientId || 'data'}_${new Date(selectedSession.startTime).toISOString().slice(0, 10)}.csv`;
     link.setAttribute('href', url);
     link.setAttribute('download', filename);
     link.style.visibility = 'hidden';
@@ -73,39 +98,46 @@ export default function HistoryTab() {
   const formatDate = (timestamp: number) => {
     const date = new Date(timestamp);
     return date.toLocaleDateString('en-US', {
-      month: 'short',
-      day: 'numeric',
-      year: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
+      month: 'short', day: 'numeric', year: 'numeric',
+      hour: '2-digit', minute: '2-digit',
     });
   };
 
   const getDuration = (start: number, end?: number) => {
     const duration = Math.floor(((end || Date.now()) - start) / 1000);
-    const minutes = Math.floor(duration / 60);
-    const seconds = duration % 60;
-    return `${minutes}m ${seconds}s`;
+    return `${Math.floor(duration / 60)}m ${duration % 60}s`;
   };
+
+  // Process Signals for Visualization
+  const { rawSlice, filteredSlice } = useMemo(() => {
+    if (!selectedSession) return { rawSlice: [], filteredSlice: [] };
+    
+    const { start, end } = getClipTimestamps();
+    
+    // 1. Get Raw Slice
+    const rawData = selectedSession.rawSignal
+      .filter(s => s.timestamp >= start && s.timestamp <= end)
+      .map(s => s.value);
+
+    // 2. Compute Filtered Slice from Raw Slice
+    // We use the same filter config used during recording
+    const filteredData = butterworthBandpass(rawData, selectedSession.filterConfig);
+
+    return { rawSlice: rawData, filteredSlice: filteredData };
+  }, [selectedSession, startMin, startSec, endMin, endSec]);
 
   if (loading) {
     return (
       <div className="w-full h-full flex items-center justify-center bg-background">
-        <div className="text-center">
-          <p className="text-muted-foreground">Loading sessions...</p>
-        </div>
+        <p className="text-muted-foreground">Loading sessions...</p>
       </div>
     );
   }
 
   // Detail View
   if (viewMode === 'detail' && selectedSession) {
-    const rawSignalData = selectedSession.rawSignal.map((s) => s.value);
-    const filteredSignalData = selectedSession.rawSignal
-      ? selectedSession.rawSignal
-          .filter((s) => (!clipStart || s.timestamp >= clipStart) && (!clipEnd || s.timestamp <= clipEnd))
-          .map((s) => s.value)
-      : [];
+    // Stats calculated on FILTERED data
+    const stats = calculateSignalStats(filteredSlice);
 
     return (
       <div className="w-full flex flex-col bg-background min-h-screen">
@@ -119,15 +151,27 @@ export default function HistoryTab() {
             Back to Sessions
           </button>
 
-          <div>
-            <h2 className="text-lg font-bold flex items-center gap-2">
-              <User className="w-5 h-5" />
-              {selectedSession.patientName || selectedSession.patientId || 'Unknown Patient'}
-            </h2>
-            <p className="text-sm text-muted-foreground mt-1">
-              <Clock className="w-4 h-4 inline mr-1" />
-              {formatDate(selectedSession.startTime)}
-            </p>
+          <div className="flex justify-between items-start">
+            <div>
+              <h2 className="text-lg font-bold flex items-center gap-2">
+                <User className="w-5 h-5" />
+                {selectedSession.patientName || selectedSession.patientId || 'Unknown Patient'}
+              </h2>
+              <p className="text-sm text-muted-foreground mt-1">
+                <Clock className="w-4 h-4 inline mr-1" />
+                {formatDate(selectedSession.startTime)}
+              </p>
+            </div>
+            {/* Quality Badge */}
+            {selectedSession.quality && (
+              <div className={`px-2 py-1 text-xs font-bold border rounded ${
+                selectedSession.quality === 'Good' ? 'text-green-500 border-green-500/50' :
+                selectedSession.quality === 'Usable' ? 'text-yellow-500 border-yellow-500/50' :
+                'text-red-500 border-red-500/50'
+              }`}>
+                {selectedSession.quality}
+              </div>
+            )}
           </div>
         </div>
 
@@ -139,8 +183,8 @@ export default function HistoryTab() {
               <p className="text-sm font-semibold">{getDuration(selectedSession.startTime, selectedSession.endTime)}</p>
             </div>
             <div className="bg-background rounded p-3">
-              <p className="text-xs text-muted-foreground">Samples</p>
-              <p className="text-sm font-semibold">{selectedSession.rawSignal.length}</p>
+              <p className="text-xs text-muted-foreground">BP (MIMIC)</p>
+              <p className="text-sm font-semibold">{selectedSession.sbp || '--'}/{selectedSession.dbp || '--'}</p>
             </div>
             <div className="bg-background rounded p-3">
               <p className="text-xs text-muted-foreground">Sampling Rate</p>
@@ -155,92 +199,98 @@ export default function HistoryTab() {
           </div>
         </div>
 
-        {/* Clipping Controls */}
+        {/* Clipping Controls (Min:Sec) */}
         <div className="p-4 bg-card border-b border-border space-y-3">
           <h3 className="font-semibold text-sm">Clip Selection</h3>
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="text-xs text-muted-foreground block mb-1">Start (ms)</label>
-              <input
-                type="number"
-                value={clipStart || selectedSession.startTime}
-                onChange={(e) => setClipStart(parseInt(e.target.value))}
-                className="w-full px-2 py-1 bg-background border border-border rounded text-xs focus:outline-none focus:ring-2 focus:ring-primary/50"
-              />
+              <label className="text-xs text-muted-foreground block mb-1">Start (Min : Sec)</label>
+              <div className="flex gap-2">
+                <input
+                  type="number" min="0" value={startMin}
+                  onChange={(e) => setStartMin(Number(e.target.value))}
+                  className="w-full px-2 py-1 bg-background border border-border rounded text-xs"
+                />
+                <span className="flex items-center">:</span>
+                <input
+                  type="number" min="0" max="59" value={startSec}
+                  onChange={(e) => setStartSec(Number(e.target.value))}
+                  className="w-full px-2 py-1 bg-background border border-border rounded text-xs"
+                />
+              </div>
             </div>
             <div>
-              <label className="text-xs text-muted-foreground block mb-1">End (ms)</label>
-              <input
-                type="number"
-                value={clipEnd || selectedSession.endTime}
-                onChange={(e) => setClipEnd(parseInt(e.target.value))}
-                className="w-full px-2 py-1 bg-background border border-border rounded text-xs focus:outline-none focus:ring-2 focus:ring-primary/50"
-              />
+              <label className="text-xs text-muted-foreground block mb-1">End (Min : Sec)</label>
+              <div className="flex gap-2">
+                <input
+                  type="number" min="0" value={endMin}
+                  onChange={(e) => setEndMin(Number(e.target.value))}
+                  className="w-full px-2 py-1 bg-background border border-border rounded text-xs"
+                />
+                <span className="flex items-center">:</span>
+                <input
+                  type="number" min="0" max="59" value={endSec}
+                  onChange={(e) => setEndSec(Number(e.target.value))}
+                  className="w-full px-2 py-1 bg-background border border-border rounded text-xs"
+                />
+              </div>
             </div>
           </div>
-          <p className="text-xs text-muted-foreground">
-            Clipped duration: {clipStart && clipEnd ? getDuration(clipStart, clipEnd) : 'N/A'}
-          </p>
         </div>
 
         {/* Visualizations */}
-        <div className="flex-1 overflow-auto p-4 space-y-4 pb-24">
-          <SignalVisualizer
-            rawSignal={rawSignalData}
-            filteredSignal={[]}
-            title="Raw Signal"
-            color="cyan"
-            height={140}
-          />
+        <div className="flex-1 overflow-auto p-4 space-y-4 pb-32">
+          {/* RESTORED: Show Filtered Signal prominently */}
           <SignalVisualizer
             rawSignal={[]}
-            filteredSignal={filteredSignalData}
-            title="Filtered Signal"
+            filteredSignal={filteredSlice}
+            title="Filtered Signal (MIMIC Processing)"
             color="emerald"
             height={140}
           />
+          
+          <SignalVisualizer
+            rawSignal={rawSlice}
+            filteredSignal={[]}
+            title="Raw Signal (Reference)"
+            color="cyan"
+            height={100}
+          />
 
-          {/* Signal Statistics */}
-          {filteredSignalData.length > 0 && (
+          {/* Filtered Signal Statistics */}
+          {filteredSlice.length > 0 && (
             <div className="bg-card border border-border rounded-lg p-4">
-              <h3 className="font-semibold text-sm mb-3">Signal Statistics</h3>
+              <h3 className="font-semibold text-sm mb-3">Signal Statistics (Filtered)</h3>
               <div className="grid grid-cols-2 gap-3 text-xs">
-                {(() => {
-                  const stats = calculateSignalStats(filteredSignalData);
-                  return (
-                    <>
-                      <div className="bg-background rounded p-2">
-                        <p className="text-muted-foreground">Min</p>
-                        <p className="font-semibold">{stats.min.toFixed(4)}</p>
-                      </div>
-                      <div className="bg-background rounded p-2">
-                        <p className="text-muted-foreground">Max</p>
-                        <p className="font-semibold">{stats.max.toFixed(4)}</p>
-                      </div>
-                      <div className="bg-background rounded p-2">
-                        <p className="text-muted-foreground">Mean</p>
-                        <p className="font-semibold">{stats.mean.toFixed(4)}</p>
-                      </div>
-                      <div className="bg-background rounded p-2">
-                        <p className="text-muted-foreground">Std Dev</p>
-                        <p className="font-semibold">{stats.std.toFixed(4)}</p>
-                      </div>
-                    </>
-                  );
-                })()}
+                 <div className="bg-background rounded p-2">
+                    <p className="text-muted-foreground">Mean</p>
+                    <p className="font-semibold">{stats.mean.toFixed(4)}</p>
+                  </div>
+                  <div className="bg-background rounded p-2">
+                    <p className="text-muted-foreground">Std Dev</p>
+                    <p className="font-semibold">{stats.std.toFixed(4)}</p>
+                  </div>
+                  <div className="bg-background rounded p-2">
+                    <p className="text-muted-foreground">Min</p>
+                    <p className="font-semibold">{stats.min.toFixed(4)}</p>
+                  </div>
+                  <div className="bg-background rounded p-2">
+                    <p className="text-muted-foreground">Max</p>
+                    <p className="font-semibold">{stats.max.toFixed(4)}</p>
+                  </div>
               </div>
             </div>
           )}
         </div>
 
-        {/* Export Controls */}
+        {/* Export Controls (Restored Position) */}
         <div className="fixed bottom-20 left-0 right-0 p-4 bg-card border-t border-border flex gap-2">
           <button
             onClick={handleExportSession}
             className="flex-1 flex items-center justify-center gap-2 px-4 py-3 bg-primary text-primary-foreground rounded-lg font-semibold hover:bg-primary/90 transition-colors"
           >
             <Download className="w-5 h-5" />
-            Export CSV
+            Export MIMIC CSV
           </button>
           <button
             onClick={() => handleDeleteSession(selectedSession.id)}
@@ -253,7 +303,7 @@ export default function HistoryTab() {
     );
   }
 
-  // List View
+  // List View (Unchanged structure)
   return (
     <div className="w-full flex flex-col bg-background min-h-screen">
       <div className="p-4 border-b border-border">
@@ -294,13 +344,15 @@ export default function HistoryTab() {
                   </div>
                 </div>
 
-                {/* Session Details */}
                 <div className="mt-3 flex flex-wrap gap-2">
+                  {/* Stats Badges */}
+                  {session.quality && (
+                    <span className={`px-2 py-1 text-xs border rounded ${
+                       session.quality === 'Good' ? 'text-green-500 border-green-500/30' : 'text-yellow-500 border-yellow-500/30'
+                    }`}>{session.quality}</span>
+                  )}
                   <span className="px-2 py-1 text-xs bg-primary/10 text-primary rounded">
                     {session.samplingRate} Hz
-                  </span>
-                  <span className="px-2 py-1 text-xs bg-accent/10 text-accent rounded">
-                    {session.filterConfig.lowCutoff}-{session.filterConfig.highCutoff} Hz
                   </span>
                 </div>
               </button>

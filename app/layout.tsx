@@ -1,5 +1,6 @@
 import React from "react"
-import type { Metadata } from 'next'
+// Add Viewport to the import
+import type { Metadata, Viewport } from 'next' 
 import { Geist, Geist_Mono } from 'next/font/google'
 import { Analytics } from '@vercel/analytics/next'
 import PWARegister from '@/components/pwa/pwa-register'
@@ -8,18 +9,22 @@ import './globals.css'
 const _geist = Geist({ subsets: ["latin"] });
 const _geistMono = Geist_Mono({ subsets: ["latin"] });
 
+// 1. Create the separate viewport export
+export const viewport: Viewport = {
+  width: 'device-width',
+  initialScale: 1,
+  maximumScale: 1,
+  userScalable: false,
+  colorScheme: 'dark',
+  themeColor: '#0f172a', // Moved from <meta name="theme-color" />
+}
+
 export const metadata: Metadata = {
   title: 'Signal Monitor - Physiological Signal Acquisition',
   description: 'Medical-grade PWA for physiological signal acquisition, analysis, and ML-based prediction aligned with MIMIC-III standards',
   generator: 'v0.app',
   manifest: '/manifest.json',
-  viewport: {
-    width: 'device-width',
-    initialScale: 1,
-    maximumScale: 1,
-    userScalable: false,
-    colorScheme: 'dark',
-  },
+  // 2. Remove the viewport object from here
   appleWebApp: {
     capable: true,
     statusBarStyle: 'black-translucent',
@@ -52,7 +57,7 @@ export default function RootLayout({
   return (
     <html lang="en">
       <head>
-        <meta name="theme-color" content="#0f172a" />
+        {/* 3. Remove the theme-color meta tag as it is now in the viewport export */}
         <meta name="apple-mobile-web-app-capable" content="yes" />
         <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
         <meta name="apple-mobile-web-app-title" content="Signal Monitor" />

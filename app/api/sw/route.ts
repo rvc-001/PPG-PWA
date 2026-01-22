@@ -100,6 +100,7 @@ self.addEventListener('fetch', (event) => {
     headers: {
       'Content-Type': 'application/javascript; charset=utf-8',
       'Cache-Control': 'public, max-age=3600',
+      'Service-Worker-Allowed': '/', // Required to allow scope: '/' from /api/sw
     },
   });
 }
