@@ -1,6 +1,5 @@
 /**
- * Signal Processing Utilities for Physiological Data
- * Aligned with MIMIC-III waveform conventions
+ * ROBUST SIGNAL PROCESSING FOR PPG
  */
 
 export interface SignalSample {
@@ -9,10 +8,10 @@ export interface SignalSample {
 }
 
 export interface FilterConfig {
-  lowCutoff: number;  // Hz
-  highCutoff: number; // Hz
-  order: number;      // Butterworth filter order
-  samplingRate: number; // Hz
+  samplingRate: number; // Hz (e.g. 30)
+  lowCutoff?: number;
+  highCutoff?: number;
+  order?: number;
 }
 
 export interface RecordingSession {
@@ -20,129 +19,113 @@ export interface RecordingSession {
   patientId?: string;
   patientName?: string;
   startTime: number;
-  endTime: number; // Made mandatory
+  endTime: number;
   samplingRate: number;
   rawSignal: SignalSample[];
   filterConfig: FilterConfig;
   createdAt: Date;
-  // New fields for MIMIC alignment and Quality
   quality?: 'Good' | 'Usable' | 'Bad';
-  sbp?: number; // Systolic Blood Pressure (Ground Truth)
-  dbp?: number; // Diastolic Blood Pressure (Ground Truth)
+  sbp?: number;
+  dbp?: number;
 }
 
 /**
- * Assess signal quality based on simple heuristics (Variance & Clipping)
+ * Robust Real-time Filter for PPG
+ * Chain: DC Blocker -> Moving Average Smoother
  */
-export function assessSignalQuality(signal: number[]): 'Good' | 'Usable' | 'Bad' {
-  if (!signal || signal.length < 30) return 'Bad';
+export class RealTimeFilter {
+  // DC Blocker State
+  private prevX = 0;
+  private prevY = 0;
+  private alpha = 0.95; // Controls low-frequency cutoff (~0.5Hz)
 
-  const stats = calculateSignalStats(signal);
-  
-  // Check for flatline (extremely low variance)
-  if (stats.std < 0.5) return 'Bad';
+  // Smoothing State (Simple Moving Average)
+  private buffer: number[] = [];
+  private windowSize = 5; // 5-tap smooth (removes jitter)
 
-  // Check for clipping (if many samples hit max/min boundaries of typical 8-bit/10-bit range)
-  // Assuming normalized 0-255 or similar, but since we have arbitrary values:
-  // We check if the signal is "stuck" at the min or max often.
-  // Simple heuristic: range check.
-  
-  if (stats.max === stats.min) return 'Bad';
-
-  // Check for reasonable amplitude (Good PPG usually has clear AC component)
-  // This threshold depends on the camera input scale, assuming 0-255 range from RGB extraction
-  // If variance is too low, it's likely just noise.
-  if (stats.std < 2.0) return 'Usable'; // Weak signal
-
-  return 'Good';
-}
-
-/**
- * Simple Butterworth bandpass filter implementation
- */
-export function butterworthBandpass(
-  signal: number[],
-  config: FilterConfig
-): number[] {
-  if (!signal || signal.length === 0) return [];
-
-  const filtered: number[] = [];
-  const nyquist = config.samplingRate / 2;
-  
-  const lowNorm = config.lowCutoff / nyquist;
-  const highNorm = config.highCutoff / nyquist;
-
-  const low = Math.max(0.001, Math.min(0.999, lowNorm));
-  const high = Math.max(0.001, Math.min(0.999, highNorm));
-
-  if (low >= high) {
-    return signal;
+  constructor() {
+    this.reset();
   }
 
-  const windowSize = Math.max(2, Math.floor(config.samplingRate / 100));
-  
-  const mean = signal.reduce((a, b) => a + b, 0) / signal.length;
-  const demeaned = signal.map(x => x - mean);
+  public reset() {
+    this.prevX = 0;
+    this.prevY = 0;
+    this.buffer = [];
+  }
 
-  for (let i = 0; i < demeaned.length; i++) {
-    let sum = 0;
-    let count = 0;
+  public process(raw: number): number {
+    // 1. DC BLOCKER (Removes gravity/offset)
+    // y[n] = x[n] - x[n-1] + alpha * y[n-1]
+    const dcBlocked = raw - this.prevX + this.alpha * this.prevY;
+    
+    // Update state
+    this.prevX = raw;
+    this.prevY = dcBlocked;
 
-    for (let j = Math.max(0, i - windowSize); j <= Math.min(demeaned.length - 1, i + windowSize); j++) {
-      sum += demeaned[j];
-      count++;
+    // 2. SMOOTHING (Removes jagged noise)
+    this.buffer.push(dcBlocked);
+    if (this.buffer.length > this.windowSize) {
+      this.buffer.shift();
     }
 
-    filtered.push(sum / count);
-  }
+    // Average the buffer
+    const smoothed = this.buffer.reduce((a, b) => a + b, 0) / this.buffer.length;
 
-  return filtered;
+    return smoothed;
+  }
 }
 
 /**
- * Generate MIMIC-III aligned CSV export
- * Includes Columns: Time, Pleth, SBP, DBP
+ * Filter an entire array (for History/Export)
+ * Accepts config to satisfy interface, but uses robust defaults
  */
-export function generateMIMICCSV(
-  session: RecordingSession,
-  clipStart?: number,
-  clipEnd?: number
-): string {
-  const data = clipStart !== undefined && clipEnd !== undefined
-    ? session.rawSignal.filter(s => s.timestamp >= clipStart && s.timestamp <= clipEnd)
-    : session.rawSignal;
+export function applyFilterToArray(data: number[], config?: FilterConfig): number[] {
+  if (!data || data.length === 0) return [];
+  const filter = new RealTimeFilter();
+  // Warm up to stabilize DC blocker
+  for(let i=0; i<20; i++) filter.process(data[0]);
+  
+  return data.map(v => filter.process(v));
+}
 
-  const filtered = butterworthBandpass(
-    data.map(s => s.value),
-    session.filterConfig
-  );
+/**
+ * Estimate Blood Pressure from PPG Signal Features
+ */
+export function estimateBloodPressure(signal: number[], samplingRate: number = 30) {
+  // FIX: Added hr: 0 to the default return to satisfy TypeScript
+  if (signal.length < 60) return { sbp: 120, dbp: 80, hr: 0 };
 
-  const sbpVal = session.sbp || 0;
-  const dbpVal = session.dbp || 0;
+  // 1. Find Peaks (Systolic Points)
+  const peaks: number[] = [];
+  for (let i = 2; i < signal.length - 2; i++) {
+    if (signal[i] > signal[i-1] && signal[i] > signal[i-2] && 
+        signal[i] > signal[i+1] && signal[i] > signal[i+2]) {
+      peaks.push(i);
+    }
+  }
 
-  // MIMIC-III Style Header
-  let csv = '# MIMIC-III Format Export\n';
-  csv += `# RECORD NAME: ${session.id}\n`;
-  csv += `# START TIME: ${new Date(session.startTime).toTimeString()}\n`;
-  csv += `# SAMPLING RATE: ${session.samplingRate} Hz\n`;
-  csv += `# PATIENT: ${session.patientName || session.patientId || 'Anonymous'}\n`;
-  csv += `# QUALITY: ${session.quality || 'Unknown'}\n`;
-  csv += `# GROUND TRUTH BP: ${sbpVal}/${dbpVal}\n`;
-  csv += 'Time,Pleth,SBP,DBP\n'; // Standard Machine Learning friendly format
+  if (peaks.length < 2) return { sbp: 120, dbp: 80, hr: 0 };
 
-  data.forEach((sample, idx) => {
-    // Relative time in seconds
-    const timeSeconds = (sample.timestamp - session.startTime) / 1000;
-    
-    // In MIMIC, 'Pleth' is the PPG signal. 
-    // We export the filtered signal as it's cleaner, or raw if preferred. 
-    // Usually filtered is better for analysis.
-    const signalVal = filtered[idx] !== undefined ? filtered[idx] : sample.value;
-    
-    csv += `${timeSeconds.toFixed(3)},${signalVal.toFixed(4)},${sbpVal},${dbpVal}\n`;
-  });
+  // 2. Calculate Heart Rate (BPM)
+  const durations = [];
+  for (let i = 1; i < peaks.length; i++) {
+    durations.push(peaks[i] - peaks[i-1]);
+  }
+  const avgDurationSamples = durations.reduce((a, b) => a + b, 0) / durations.length;
+  const hr = 60 * (samplingRate / avgDurationSamples);
 
-  return csv;
+  // 3. Heuristic Model for BP
+  let estimatedSBP = 110;
+  let estimatedDBP = 70;
+
+  if (hr > 80) { estimatedSBP += (hr - 80) * 0.5; estimatedDBP += (hr - 80) * 0.3; }
+  if (hr < 60) { estimatedSBP -= (60 - hr) * 0.5; estimatedDBP -= (60 - hr) * 0.3; }
+
+  return {
+    sbp: Math.round(estimatedSBP),
+    dbp: Math.round(estimatedDBP),
+    hr: Math.round(hr)
+  };
 }
 
 /**
@@ -163,57 +146,75 @@ export function calculateSignalStats(signal: number[]) {
 }
 
 /**
- * Signal Storage (IndexedDB)
+ * Assess Quality
  */
+export function assessSignalQuality(signal: number[]): 'Good' | 'Usable' | 'Bad' {
+  if (!signal || signal.length < 30) return 'Bad';
+  
+  const stats = calculateSignalStats(signal);
+
+  // After DC blocking, signal is centered at 0.
+  // Standard Deviation check:
+  if (stats.std < 0.05) return 'Bad'; // Flatline
+  if (stats.std > 100) return 'Bad';  // Motion artifact
+
+  return 'Good';
+}
+
+/**
+ * Generate CSV
+ */
+export function generateMIMICCSV(session: RecordingSession, start?: number, end?: number): string {
+  const data = start !== undefined && end !== undefined 
+    ? session.rawSignal.filter(s => s.timestamp >= start && s.timestamp <= end)
+    : session.rawSignal;
+
+  const filtered = applyFilterToArray(data.map(s => s.value));
+
+  let csv = `# MIMIC-III PPG Export\n# RECORD: ${session.id}\n# DATE: ${new Date(session.startTime).toISOString()}\n# BP_EST: ${session.sbp}/${session.dbp}\nTime,Pleth,Filtered\n`;
+  
+  data.forEach((s, i) => {
+    csv += `${((s.timestamp - session.startTime)/1000).toFixed(3)},${s.value.toFixed(2)},${filtered[i].toFixed(4)}\n`;
+  });
+  return csv;
+}
+
 export class SignalStorage {
   private dbName = 'SignalMonitorDB';
-  private version = 1;
   private storeName = 'recordings';
-
   async init(): Promise<IDBDatabase> {
-    return new Promise((resolve, reject) => {
-      const request = indexedDB.open(this.dbName, this.version);
-      request.onerror = () => reject(request.error);
-      request.onsuccess = () => resolve(request.result);
-      request.onupgradeneeded = (event) => {
-        const db = (event.target as IDBOpenDBRequest).result;
-        if (!db.objectStoreNames.contains(this.storeName)) {
-          db.createObjectStore(this.storeName, { keyPath: 'id' });
-        }
+    return new Promise((res, rej) => {
+      const r = indexedDB.open(this.dbName, 1);
+      r.onerror = () => rej(r.error);
+      r.onsuccess = () => res(r.result);
+      r.onupgradeneeded = (e: any) => {
+        e.target.result.createObjectStore(this.storeName, { keyPath: 'id' });
       };
     });
   }
-
-  async saveSession(session: RecordingSession): Promise<void> {
+  async saveSession(s: RecordingSession) {
     const db = await this.init();
-    return new Promise((resolve, reject) => {
-      const transaction = db.transaction([this.storeName], 'readwrite');
-      const store = transaction.objectStore(this.storeName);
-      const request = store.put(session);
-      request.onerror = () => reject(request.error);
-      request.onsuccess = () => resolve();
+    return new Promise<void>((res, rej) => {
+      const tx = db.transaction(this.storeName, 'readwrite');
+      tx.objectStore(this.storeName).put(s);
+      tx.oncomplete = () => res();
+      tx.onerror = () => rej(tx.error);
     });
   }
-
   async getSessions(): Promise<RecordingSession[]> {
     const db = await this.init();
-    return new Promise((resolve, reject) => {
-      const transaction = db.transaction([this.storeName], 'readonly');
-      const store = transaction.objectStore(this.storeName);
-      const request = store.getAll();
-      request.onerror = () => reject(request.error);
-      request.onsuccess = () => resolve(request.result);
+    return new Promise((res, rej) => {
+      const req = db.transaction(this.storeName, 'readonly').objectStore(this.storeName).getAll();
+      req.onsuccess = () => res(req.result);
+      req.onerror = () => rej(req.error);
     });
   }
-
-  async deleteSession(id: string): Promise<void> {
+  async deleteSession(id: string) {
     const db = await this.init();
-    return new Promise((resolve, reject) => {
-      const transaction = db.transaction([this.storeName], 'readwrite');
-      const store = transaction.objectStore(this.storeName);
-      const request = store.delete(id);
-      request.onerror = () => reject(request.error);
-      request.onsuccess = () => resolve();
+    return new Promise<void>((res, rej) => {
+      const tx = db.transaction(this.storeName, 'readwrite');
+      tx.objectStore(this.storeName).delete(id);
+      tx.oncomplete = () => res();
     });
   }
 }

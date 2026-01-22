@@ -1,6 +1,7 @@
 export async function GET() {
   const swCode = `
-const CACHE_NAME = 'signal-monitor-v1';
+// UPDATE VERSION TO FORCE RELOAD
+const CACHE_NAME = 'signal-monitor-v2-dev'; 
 const urlsToCache = [
   '/',
   '/index.html',
@@ -8,29 +9,22 @@ const urlsToCache = [
   '/globals.css'
 ];
 
-// Install event - cache essential files
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => {
-      return cache.addAll(urlsToCache).catch(() => {
-        // Silently fail if caching fails
-        return Promise.resolve();
-      });
-    })
+    caches.open(CACHE_NAME).then((cache) => cache.addAll(urlsToCache))
   );
   self.skipWaiting();
 });
 
-// Activate event - clean up old caches
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches.keys().then((cacheNames) => {
       return Promise.all(
         cacheNames.map((cacheName) => {
           if (cacheName !== CACHE_NAME) {
+            console.log('Deleting old cache:', cacheName);
             return caches.delete(cacheName);
           }
-          return Promise.resolve();
         })
       );
     })
@@ -38,60 +32,26 @@ self.addEventListener('activate', (event) => {
   self.clients.claim();
 });
 
-// Fetch event - network first, fallback to cache
+// DEV STRATEGY: NETWORK FIRST (Always try to get fresh code)
 self.addEventListener('fetch', (event) => {
-  const { request } = event;
+  if (event.request.method !== 'GET') return;
 
-  // Skip non-GET requests
-  if (request.method !== 'GET') {
-    return;
-  }
-
-  // For API calls, use network first with cache fallback
-  if (request.url.includes('/api/')) {
-    event.respondWith(
-      fetch(request)
-        .then((response) => {
-          // Cache successful API responses
-          if (response.ok) {
-            const cache = caches.open(CACHE_NAME);
-            cache.then((c) => c.put(request, response.clone()));
-          }
-          return response;
-        })
-        .catch(() => {
-          // Try cache on network failure
-          return caches.match(request);
-        })
-    );
-    return;
-  }
-
-  // For static assets, use cache first with network fallback
   event.respondWith(
-    caches.match(request).then((response) => {
-      if (response) {
-        return response;
-      }
-
-      return fetch(request)
-        .then((response) => {
-          if (!response || response.status !== 200 || response.type !== 'basic') {
-            return response;
-          }
-
+    fetch(event.request)
+      .then((response) => {
+        // Update cache with fresh copy if successful
+        if (response && response.status === 200 && response.type === 'basic') {
           const responseToCache = response.clone();
           caches.open(CACHE_NAME).then((cache) => {
-            cache.put(request, responseToCache);
+            cache.put(event.request, responseToCache);
           });
-
-          return response;
-        })
-        .catch(() => {
-          // Return offline page or cached response if available
-          return caches.match(request);
-        });
-    })
+        }
+        return response;
+      })
+      .catch(() => {
+        // Fallback to cache ONLY if offline/network fails
+        return caches.match(event.request);
+      })
   );
 });
 `;
@@ -99,8 +59,8 @@ self.addEventListener('fetch', (event) => {
   return new Response(swCode, {
     headers: {
       'Content-Type': 'application/javascript; charset=utf-8',
-      'Cache-Control': 'public, max-age=3600',
-      'Service-Worker-Allowed': '/', // Required to allow scope: '/' from /api/sw
+      'Cache-Control': 'no-cache, no-store, must-revalidate', // Disable HTTP caching
+      'Service-Worker-Allowed': '/',
     },
   });
 }
