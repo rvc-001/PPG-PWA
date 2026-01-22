@@ -62,6 +62,7 @@ export default function RecordingTab() {
     setVisFiltered([]);
     setRecordingTime(0);
     setSampleCount(0);
+    setEstimatedBP({ sbp: 0, dbp: 0, hr: 0 });
     
     if (filterRef.current) filterRef.current.reset();
 
@@ -81,7 +82,27 @@ export default function RecordingTab() {
       const filteredVal = filterRef.current ? filterRef.current.process(rawVal) : rawVal;
 
       recordedSamplesRef.current.push({ timestamp: Date.now(), value: rawVal });
-      setSampleCount(c => c + 1);
+      setSampleCount(c => {
+         const newCount = c + 1;
+         // LIVE BP ESTIMATION (Every 60 samples ~ 2 seconds)
+         if (newCount % 60 === 0) {
+            // Get last 150 samples (5 sec) for estimation
+            const recent = recordedSamplesRef.current.slice(-150).map(s => s.value);
+            // We must filter this slice separately to estimate BP features correctly
+            // or we can use the `visFiltered` buffer if we kept it in a Ref.
+            // Re-filtering short slice is fast:
+            const tempFilter = new RealTimeFilter();
+            // Warmup
+            for(let i=0; i<5; i++) tempFilter.process(recent[0]);
+            const cleanRecent = recent.map(v => tempFilter.process(v));
+            
+            const est = estimateBloodPressure(cleanRecent, 30);
+            if (est.hr > 40 && est.hr < 180) { // Filter crazy values
+                 setEstimatedBP(est);
+            }
+         }
+         return newCount;
+      });
 
       setVisRaw(prev => [...prev, rawVal].slice(-300));
       setVisFiltered(prev => [...prev, filteredVal].slice(-300));
@@ -95,15 +116,15 @@ export default function RecordingTab() {
     
     const fullData = recordedSamplesRef.current.map(s => s.value);
     
-    // Estimate Quality
+    // Final high-quality estimation
     const filter = new RealTimeFilter();
-    const cleanSignal = fullData.map(v => filter.process(v)); // Re-process full signal cleanly
+    const cleanSignal = fullData.map(v => filter.process(v));
+    
     const quality = assessSignalQuality(cleanSignal);
     setQualityReport(quality);
 
-    // Estimate BP
     const estimate = estimateBloodPressure(cleanSignal, 30);
-    setEstimatedBP(estimate); // Types should now match
+    setEstimatedBP(estimate);
 
     setShowReportModal(true);
   };
@@ -140,6 +161,14 @@ export default function RecordingTab() {
         {isRecording && (
           <div className="absolute top-4 right-4 flex flex-col items-end gap-2 z-20">
             <div className="bg-black/50 p-2 rounded backdrop-blur-sm text-white font-mono font-bold">{formatTime(recordingTime)}</div>
+            
+            {/* Live BP Display */}
+            {estimatedBP.hr > 0 && (
+               <div className="bg-emerald-500/90 p-2 rounded backdrop-blur-sm text-xs text-white font-bold animate-in fade-in slide-in-from-right-5">
+                  HR: {estimatedBP.hr} | BP: {estimatedBP.sbp}/{estimatedBP.dbp}
+               </div>
+            )}
+
             <div className="bg-black/50 p-2 rounded backdrop-blur-sm text-xs text-gray-300">
                <Activity className="w-3 h-3 inline mr-1" /> {sampleCount} pts
             </div>
@@ -188,7 +217,7 @@ export default function RecordingTab() {
             </div>
 
             <div className="space-y-4 mb-6">
-               <h3 className="font-semibold text-sm">Calibration / Reference</h3>
+               <h3 className="font-semibold text-sm">Calibration</h3>
                <div className="grid grid-cols-2 gap-4">
                  <div><label className="text-xs block mb-1">Systolic</label><input type="number" value={estimatedBP.sbp} onChange={e=>setEstimatedBP({...estimatedBP, sbp: +e.target.value})} className="w-full bg-background border rounded p-2" /></div>
                  <div><label className="text-xs block mb-1">Diastolic</label><input type="number" value={estimatedBP.dbp} onChange={e=>setEstimatedBP({...estimatedBP, dbp: +e.target.value})} className="w-full bg-background border rounded p-2" /></div>

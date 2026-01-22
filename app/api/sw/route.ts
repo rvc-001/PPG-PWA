@@ -1,7 +1,7 @@
 export async function GET() {
   const swCode = `
-// UPDATE VERSION TO FORCE RELOAD
-const CACHE_NAME = 'signal-monitor-v2-dev'; 
+// Increment this version to force all users to get the new update
+const CACHE_NAME = 'signal-monitor-v2-production'; 
 const urlsToCache = [
   '/',
   '/index.html',
@@ -9,37 +9,43 @@ const urlsToCache = [
   '/globals.css'
 ];
 
+// Install: Cache core files
 self.addEventListener('install', (event) => {
+  self.skipWaiting(); // Force activation immediately
   event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(urlsToCache))
+    caches.open(CACHE_NAME).then((cache) => {
+      return cache.addAll(urlsToCache).catch((err) => {
+        console.error('Cache addAll error:', err);
+      });
+    })
   );
-  self.skipWaiting();
 });
 
+// Activate: Delete old caches immediately
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches.keys().then((cacheNames) => {
       return Promise.all(
         cacheNames.map((cacheName) => {
           if (cacheName !== CACHE_NAME) {
-            console.log('Deleting old cache:', cacheName);
+            console.log('Clearing old cache:', cacheName);
             return caches.delete(cacheName);
           }
         })
       );
     })
   );
-  self.clients.claim();
+  self.clients.claim(); // Take control of all clients immediately
 });
 
-// DEV STRATEGY: NETWORK FIRST (Always try to get fresh code)
+// Fetch: Network First strategy (Vital for frequent updates)
 self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET') return;
 
   event.respondWith(
     fetch(event.request)
       .then((response) => {
-        // Update cache with fresh copy if successful
+        // If network works, return response and update cache
         if (response && response.status === 200 && response.type === 'basic') {
           const responseToCache = response.clone();
           caches.open(CACHE_NAME).then((cache) => {
@@ -49,7 +55,7 @@ self.addEventListener('fetch', (event) => {
         return response;
       })
       .catch(() => {
-        // Fallback to cache ONLY if offline/network fails
+        // If offline, try cache
         return caches.match(event.request);
       })
   );
@@ -59,7 +65,8 @@ self.addEventListener('fetch', (event) => {
   return new Response(swCode, {
     headers: {
       'Content-Type': 'application/javascript; charset=utf-8',
-      'Cache-Control': 'no-cache, no-store, must-revalidate', // Disable HTTP caching
+      // CRITICAL: Tell browsers NEVER to cache the service worker file itself
+      'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0',
       'Service-Worker-Allowed': '/',
     },
   });

@@ -1,5 +1,6 @@
 /**
  * ROBUST SIGNAL PROCESSING FOR PPG
+ * Implements 4th Order Butterworth LowPass + Refractory Peak Detection
  */
 
 export interface SignalSample {
@@ -9,9 +10,6 @@ export interface SignalSample {
 
 export interface FilterConfig {
   samplingRate: number; // Hz (e.g. 30)
-  lowCutoff?: number;
-  highCutoff?: number;
-  order?: number;
 }
 
 export interface RecordingSession {
@@ -30,149 +28,169 @@ export interface RecordingSession {
 }
 
 /**
- * Robust Real-time Filter for PPG
- * Chain: DC Blocker -> Moving Average Smoother
+ * 4th Order Butterworth LowPass Filter (4Hz Cutoff at 30Hz)
+ * Removes high-frequency camera noise (jitter) that causes false HR peaks.
  */
-export class RealTimeFilter {
-  // DC Blocker State
-  private prevX = 0;
-  private prevY = 0;
-  private alpha = 0.95; // Controls low-frequency cutoff (~0.5Hz)
+class ButterworthLowPass {
+  // Coefficients for 4Hz cutoff @ 30Hz sampling
+  // Calculated via standard biquad formulas
+  private readonly b = [0.0048, 0.0193, 0.0289, 0.0193, 0.0048];
+  private readonly a = [1.0000, -2.3695, 2.3140, -1.0547, 0.1874];
 
-  // Smoothing State (Simple Moving Average)
-  private buffer: number[] = [];
-  private windowSize = 5; // 5-tap smooth (removes jitter)
+  // History buffers (x = input, y = output)
+  private x: number[] = [0, 0, 0, 0, 0];
+  private y: number[] = [0, 0, 0, 0, 0];
 
-  constructor() {
-    this.reset();
-  }
+  public process(input: number): number {
+    // Shift history
+    this.x.unshift(input); this.x.pop();
+    this.y.unshift(0);     this.y.pop(); // Placeholder for new output
 
-  public reset() {
-    this.prevX = 0;
-    this.prevY = 0;
-    this.buffer = [];
-  }
+    // Difference Equation
+    const output = 
+      (this.b[0]*this.x[0] + this.b[1]*this.x[1] + this.b[2]*this.x[2] + this.b[3]*this.x[3] + this.b[4]*this.x[4]) -
+      (this.a[1]*this.y[1] + this.a[2]*this.y[2] + this.a[3]*this.y[3] + this.a[4]*this.y[4]);
 
-  public process(raw: number): number {
-    // 1. DC BLOCKER (Removes gravity/offset)
-    // y[n] = x[n] - x[n-1] + alpha * y[n-1]
-    const dcBlocked = raw - this.prevX + this.alpha * this.prevY;
-    
-    // Update state
-    this.prevX = raw;
-    this.prevY = dcBlocked;
-
-    // 2. SMOOTHING (Removes jagged noise)
-    this.buffer.push(dcBlocked);
-    if (this.buffer.length > this.windowSize) {
-      this.buffer.shift();
-    }
-
-    // Average the buffer
-    const smoothed = this.buffer.reduce((a, b) => a + b, 0) / this.buffer.length;
-
-    return smoothed;
+    this.y[0] = output;
+    return output;
   }
 }
 
 /**
- * Filter an entire array (for History/Export)
- * Accepts config to satisfy interface, but uses robust defaults
+ * Main Real-time Filter Class
+ * Chain: DC Blocker (0.5Hz) -> Butterworth LowPass (4Hz)
+ */
+export class RealTimeFilter {
+  private prevX = 0;
+  private prevY = 0;
+  private alpha = 0.9; // Fast DC blocker
+  private isInitialized = false;
+  
+  private lpf = new ButterworthLowPass();
+
+  constructor() { this.reset(); }
+
+  public reset() {
+    this.prevX = 0; this.prevY = 0;
+    this.isInitialized = false;
+    this.lpf = new ButterworthLowPass(); // Reset LPF state
+  }
+
+  public process(raw: number): number {
+    // 0. Init Step: Lock onto the DC offset instantly
+    if (!this.isInitialized) {
+      this.prevX = raw;
+      this.isInitialized = true;
+      // Pre-load the filter to avoid "startup spike"
+      for (let i = 0; i < 10; i++) this.lpf.process(0);
+      return 0;
+    }
+
+    // 1. DC Blocker (High Pass 0.5Hz) - Removes gravity/lighting drift
+    const dcBlocked = raw - this.prevX + this.alpha * this.prevY;
+    this.prevX = raw;
+    this.prevY = dcBlocked;
+
+    // 2. Butterworth Low Pass (4Hz) - Removes the "Jitter"
+    const filtered = this.lpf.process(dcBlocked);
+
+    return filtered;
+  }
+}
+
+/**
+ * Filter Array Helper
  */
 export function applyFilterToArray(data: number[], config?: FilterConfig): number[] {
   if (!data || data.length === 0) return [];
   const filter = new RealTimeFilter();
-  // Warm up to stabilize DC blocker
-  for(let i=0; i<20; i++) filter.process(data[0]);
-  
+  // Warmup not strictly needed with new init logic, but good for safety
   return data.map(v => filter.process(v));
 }
 
 /**
- * Estimate Blood Pressure from PPG Signal Features
+ * Improved BP & HR Estimator
+ * Includes Refractory Period to stop "170 HR" noise readings
  */
 export function estimateBloodPressure(signal: number[], samplingRate: number = 30) {
-  // FIX: Added hr: 0 to the default return to satisfy TypeScript
   if (signal.length < 60) return { sbp: 120, dbp: 80, hr: 0 };
 
-  // 1. Find Peaks (Systolic Points)
+  // 1. Robust Peak Detection
   const peaks: number[] = [];
+  const minDistance = Math.floor(samplingRate * 0.25); // 250ms refractory period (Max ~240 BPM)
+  let lastPeakIndex = -minDistance;
+
+  // Calculate local threshold (signal strength)
+  const mean = signal.reduce((a,b)=>a+b,0)/signal.length;
+  
   for (let i = 2; i < signal.length - 2; i++) {
+    // Must be a local max
     if (signal[i] > signal[i-1] && signal[i] > signal[i-2] && 
         signal[i] > signal[i+1] && signal[i] > signal[i+2]) {
-      peaks.push(i);
+      
+      // Must be above baseline (ignore ripples in the valley)
+      if (signal[i] > mean) {
+         // Must respect refractory period
+         if ((i - lastPeakIndex) > minDistance) {
+           peaks.push(i);
+           lastPeakIndex = i;
+         }
+      }
     }
   }
 
   if (peaks.length < 2) return { sbp: 120, dbp: 80, hr: 0 };
 
-  // 2. Calculate Heart Rate (BPM)
+  // 2. Calculate Robust HR
   const durations = [];
   for (let i = 1; i < peaks.length; i++) {
     durations.push(peaks[i] - peaks[i-1]);
   }
   const avgDurationSamples = durations.reduce((a, b) => a + b, 0) / durations.length;
-  const hr = 60 * (samplingRate / avgDurationSamples);
+  let hr = Math.round(60 * (samplingRate / avgDurationSamples));
 
-  // 3. Heuristic Model for BP
-  let estimatedSBP = 110;
-  let estimatedDBP = 70;
+  // 3. Estimate BP (Heuristic)
+  let sbp = 110;
+  let dbp = 70;
 
-  if (hr > 80) { estimatedSBP += (hr - 80) * 0.5; estimatedDBP += (hr - 80) * 0.3; }
-  if (hr < 60) { estimatedSBP -= (60 - hr) * 0.5; estimatedDBP -= (60 - hr) * 0.3; }
+  // HR adjustment (Tachycardia increases BP usually)
+  if (hr > 80 && hr < 180) { sbp += (hr - 80) * 0.5; dbp += (hr - 80) * 0.3; }
+  if (hr < 60 && hr > 30) { sbp -= (60 - hr) * 0.5; dbp -= (60 - hr) * 0.3; }
 
-  return {
-    sbp: Math.round(estimatedSBP),
-    dbp: Math.round(estimatedDBP),
-    hr: Math.round(hr)
-  };
+  // Clamp values to realistic ranges
+  hr = Math.max(40, Math.min(180, hr));
+  sbp = Math.max(90, Math.min(180, sbp));
+  dbp = Math.max(60, Math.min(110, dbp));
+
+  return { sbp: Math.round(sbp), dbp: Math.round(dbp), hr };
 }
 
-/**
- * Calculate statistics for signal segment
- */
 export function calculateSignalStats(signal: number[]) {
-  if (!signal || signal.length === 0) {
-    return { min: 0, max: 0, mean: 0, std: 0, variance: 0 };
-  }
-
+  if (!signal || signal.length === 0) return { min: 0, max: 0, mean: 0, std: 0, variance: 0 };
   const min = Math.min(...signal);
   const max = Math.max(...signal);
   const mean = signal.reduce((a, b) => a + b, 0) / signal.length;
   const variance = signal.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / signal.length;
   const std = Math.sqrt(variance);
-
   return { min, max, mean, std, variance };
 }
 
-/**
- * Assess Quality
- */
 export function assessSignalQuality(signal: number[]): 'Good' | 'Usable' | 'Bad' {
   if (!signal || signal.length < 30) return 'Bad';
-  
   const stats = calculateSignalStats(signal);
-
-  // After DC blocking, signal is centered at 0.
-  // Standard Deviation check:
-  if (stats.std < 0.05) return 'Bad'; // Flatline
-  if (stats.std > 100) return 'Bad';  // Motion artifact
-
+  // Std deviation too low = no pulse detected
+  if (stats.std < 0.01) return 'Bad';
   return 'Good';
 }
 
-/**
- * Generate CSV
- */
 export function generateMIMICCSV(session: RecordingSession, start?: number, end?: number): string {
   const data = start !== undefined && end !== undefined 
     ? session.rawSignal.filter(s => s.timestamp >= start && s.timestamp <= end)
     : session.rawSignal;
-
+  
   const filtered = applyFilterToArray(data.map(s => s.value));
 
-  let csv = `# MIMIC-III PPG Export\n# RECORD: ${session.id}\n# DATE: ${new Date(session.startTime).toISOString()}\n# BP_EST: ${session.sbp}/${session.dbp}\nTime,Pleth,Filtered\n`;
-  
+  let csv = `# MIMIC-III PPG Export\n# ID: ${session.id}\n# BP: ${session.sbp}/${session.dbp}\nTime,Pleth,Filtered\n`;
   data.forEach((s, i) => {
     csv += `${((s.timestamp - session.startTime)/1000).toFixed(3)},${s.value.toFixed(2)},${filtered[i].toFixed(4)}\n`;
   });
@@ -187,9 +205,7 @@ export class SignalStorage {
       const r = indexedDB.open(this.dbName, 1);
       r.onerror = () => rej(r.error);
       r.onsuccess = () => res(r.result);
-      r.onupgradeneeded = (e: any) => {
-        e.target.result.createObjectStore(this.storeName, { keyPath: 'id' });
-      };
+      r.onupgradeneeded = (e: any) => { e.target.result.createObjectStore(this.storeName, { keyPath: 'id' }); };
     });
   }
   async saveSession(s: RecordingSession) {
@@ -198,7 +214,6 @@ export class SignalStorage {
       const tx = db.transaction(this.storeName, 'readwrite');
       tx.objectStore(this.storeName).put(s);
       tx.oncomplete = () => res();
-      tx.onerror = () => rej(tx.error);
     });
   }
   async getSessions(): Promise<RecordingSession[]> {
@@ -206,7 +221,6 @@ export class SignalStorage {
     return new Promise((res, rej) => {
       const req = db.transaction(this.storeName, 'readonly').objectStore(this.storeName).getAll();
       req.onsuccess = () => res(req.result);
-      req.onerror = () => rej(req.error);
     });
   }
   async deleteSession(id: string) {

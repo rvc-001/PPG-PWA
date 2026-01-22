@@ -1,125 +1,96 @@
 'use client';
 
-import { useEffect, useRef } from 'react';
+import React, { useEffect, useRef } from 'react';
 
 interface SignalVisualizerProps {
   rawSignal: number[];
   filteredSignal: number[];
-  title: string;
-  maxDataPoints?: number;
-  color?: 'cyan' | 'emerald';
+  title?: string;
+  color?: string;
   height?: number;
 }
 
 export default function SignalVisualizer({
-  rawSignal,
-  filteredSignal,
-  title,
-  maxDataPoints = 300,
+  rawSignal = [],
+  filteredSignal = [],
+  title = 'Signal',
   color = 'cyan',
-  height = 150,
+  height = 150
 }: SignalVisualizerProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const data = filteredSignal.length > 0 ? filteredSignal : rawSignal;
 
   useEffect(() => {
-    if (!canvasRef.current) return;
-
     const canvas = canvasRef.current;
+    if (!canvas) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    // Set canvas size
-    canvas.width = canvas.offsetWidth;
-    canvas.height = height;
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    ctx.scale(dpr, dpr);
 
-    const width = canvas.width;
-    const h = canvas.height;
-    const padding = 10;
+    ctx.clearRect(0, 0, rect.width, rect.height);
 
-    // Clear canvas
-    ctx.fillStyle = 'rgba(15, 23, 42, 0.5)';
-    ctx.fillRect(0, 0, width, h);
-
-    // Draw grid
-    ctx.strokeStyle = 'rgba(51, 65, 85, 0.3)';
-    ctx.lineWidth = 1;
-
-    // Vertical grid lines
-    for (let i = 0; i < width; i += 40) {
+    if (data.length === 0) {
+      // Draw "Waiting" line
       ctx.beginPath();
-      ctx.moveTo(i, 0);
-      ctx.lineTo(i, h);
+      ctx.strokeStyle = '#333';
+      ctx.moveTo(0, rect.height / 2);
+      ctx.lineTo(rect.width, rect.height / 2);
       ctx.stroke();
+      return;
     }
 
-    // Horizontal grid lines
-    for (let i = 0; i < h; i += 40) {
-      ctx.beginPath();
-      ctx.moveTo(0, i);
-      ctx.lineTo(width, i);
-      ctx.stroke();
+    // Auto-Scale
+    let min = Infinity, max = -Infinity;
+    for (let i = 0; i < data.length; i++) {
+      if (data[i] < min) min = data[i];
+      if (data[i] > max) max = data[i];
     }
 
-    // Draw border
-    ctx.strokeStyle = 'rgba(148, 163, 184, 0.3)';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(0, 0, width, h);
+    // Prevent flatline divide-by-zero
+    if (max === min) {
+      min -= 0.5;
+      max += 0.5;
+    }
 
-    // Use appropriate signal
-    const data = filteredSignal.length > 0 ? filteredSignal : rawSignal;
-    if (data.length === 0) return;
-
-    // Limit data points for performance
-    const displayData = data.slice(-maxDataPoints);
-
-    // Find min and max for scaling
-    const min = Math.min(...displayData);
-    const max = Math.max(...displayData);
-    const range = max - min || 1;
-
-    // Draw signal
-    const colorMap = {
-      cyan: 'rgb(6, 182, 212)',
-      emerald: 'rgb(16, 185, 129)',
-    };
-
-    ctx.strokeStyle = colorMap[color];
-    ctx.lineWidth = 1.5;
+    const range = max - min;
+    const padding = range * 0.1;
+    const yMin = min - padding;
+    const yMax = max + padding;
+    const yRange = yMax - yMin;
+    const stepX = rect.width / (data.length - 1 || 1);
+    
     ctx.beginPath();
+    ctx.strokeStyle = color === 'emerald' ? '#10b981' : '#06b6d4';
+    ctx.lineWidth = 2;
+    ctx.lineJoin = 'round';
 
-    displayData.forEach((value, index) => {
-      // Normalize value to canvas height
-      const x = (index / displayData.length) * (width - padding * 2) + padding;
-      const y = h - ((value - min) / range) * (h - padding * 2) - padding;
-
-      if (index === 0) {
-        ctx.moveTo(x, y);
-      } else {
-        ctx.lineTo(x, y);
-      }
-    });
-
+    for (let i = 0; i < data.length; i++) {
+      const x = i * stepX;
+      const normalizedY = (data[i] - yMin) / (yRange || 1);
+      const y = rect.height - (normalizedY * rect.height);
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
     ctx.stroke();
 
-    // Draw legend
-    ctx.fillStyle = colorMap[color];
-    ctx.font = '12px monospace';
-    ctx.textAlign = 'right';
-    ctx.fillText(`Min: ${min.toFixed(2)}`, width - 5, 20);
-    ctx.fillText(`Max: ${max.toFixed(2)}`, width - 5, 35);
-    ctx.fillText(`Samples: ${displayData.length}`, width - 5, 50);
-  }, [rawSignal, filteredSignal, maxDataPoints, color, height]);
+  }, [data, color, height]);
 
   return (
-    <div className="w-full bg-card border border-border rounded-lg overflow-hidden">
-      <div className="px-3 py-2 border-b border-border bg-background/50">
-        <h3 className="text-sm font-semibold text-foreground">{title}</h3>
+    <div className="bg-card border border-border rounded-xl overflow-hidden shadow-sm">
+      {title && (
+        <div className="px-4 py-2 border-b border-border bg-muted/20 flex justify-between items-center">
+          <h3 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">{title}</h3>
+          <span className="text-[10px] font-mono text-muted-foreground">{data.length} pts</span>
+        </div>
+      )}
+      <div style={{ height: height }} className="relative w-full">
+        <canvas ref={canvasRef} style={{ width: '100%', height: '100%' }} className="block" />
       </div>
-      <canvas
-        ref={canvasRef}
-        className="w-full"
-        style={{ height: `${height}px` }}
-      />
     </div>
   );
 }
