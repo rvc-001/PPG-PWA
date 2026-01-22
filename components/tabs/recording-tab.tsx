@@ -5,7 +5,7 @@ import { RPPGAcquisition, generateSimulatedSignal } from '@/lib/camera-utils';
 import { RealTimeFilter, SignalStorage, RecordingSession, FilterConfig, assessSignalQuality, estimateBloodPressure } from '@/lib/signal-processing';
 import SignalVisualizer from '@/components/visualization/signal-visualizer';
 import { AppSettingsContext } from '@/lib/app-context';
-import { Pause, Play, Save, Activity } from 'lucide-react';
+import { Pause, Play, Save, Activity, AlertTriangle } from 'lucide-react';
 
 export default function RecordingTab() {
   const { settings } = useContext(AppSettingsContext);
@@ -15,8 +15,9 @@ export default function RecordingTab() {
 
   const [isRecording, setIsRecording] = useState(false);
   const [cameraPermission, setCameraPermission] = useState<'pending' | 'granted' | 'denied'>('pending');
-  const [patientInfo, setPatientInfo] = useState({ id: '', name: '' });
+  const [cameraError, setCameraError] = useState<string>('');
   
+  const [patientInfo, setPatientInfo] = useState({ id: '', name: '' });
   const [showPatientModal, setShowPatientModal] = useState(false);
   const [showReportModal, setShowReportModal] = useState(false);
 
@@ -36,20 +37,44 @@ export default function RecordingTab() {
 
   useEffect(() => {
     filterRef.current = new RealTimeFilter();
-    const requestCamera = async () => {
+    
+    // Auto-init camera logic
+    const initCamera = async () => {
       try {
         if (!rpPgRef.current) rpPgRef.current = new RPPGAcquisition(30);
+        
+        // This will request Rear Camera + Torch
         const stream = await rpPgRef.current.requestCameraPermission();
         streamRef.current = stream;
-        if (videoRef.current) videoRef.current.srcObject = stream;
+        
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          // IMPORTANT: Must wait for loadedmetadata to play on some mobile
+          videoRef.current.onloadedmetadata = () => {
+             videoRef.current?.play().catch(e => console.error("Play error:", e));
+          };
+        }
         setCameraPermission('granted');
-      } catch (error) {
-        console.error('Camera error:', error);
+        setCameraError('');
+      } catch (error: any) {
+        console.error('Camera init error:', error);
         setCameraPermission('denied');
+        
+        if (error.name === 'NotAllowedError') {
+          setCameraError('Permission denied. Please allow camera access in browser settings.');
+        } else if (window.location.protocol !== 'https:' && window.location.hostname !== 'localhost') {
+           setCameraError('Secure Context Required. App must be served over HTTPS.');
+        } else {
+           setCameraError('Could not access rear camera or torch. ' + error.message);
+        }
       }
     };
-    requestCamera();
-    return () => { if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop()); };
+
+    initCamera();
+
+    return () => { 
+      if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop()); 
+    };
   }, []);
 
   const handleStartRecording = () => {
@@ -66,7 +91,7 @@ export default function RecordingTab() {
     
     if (filterRef.current) filterRef.current.reset();
 
-    const intervalMs = 1000 / 30; // 30Hz
+    const intervalMs = 1000 / 30; 
 
     recordingIntervalRef.current = setInterval(() => {
       setRecordingTime(t => t + (intervalMs / 1000));
@@ -84,22 +109,16 @@ export default function RecordingTab() {
       recordedSamplesRef.current.push({ timestamp: Date.now(), value: rawVal });
       setSampleCount(c => {
          const newCount = c + 1;
-         // LIVE BP ESTIMATION (Every 60 samples ~ 2 seconds)
+         // Live BP (every ~2s)
          if (newCount % 60 === 0) {
-            // Get last 150 samples (5 sec) for estimation
             const recent = recordedSamplesRef.current.slice(-150).map(s => s.value);
-            // We must filter this slice separately to estimate BP features correctly
-            // or we can use the `visFiltered` buffer if we kept it in a Ref.
-            // Re-filtering short slice is fast:
             const tempFilter = new RealTimeFilter();
-            // Warmup
+            // Fast warmup
             for(let i=0; i<5; i++) tempFilter.process(recent[0]);
             const cleanRecent = recent.map(v => tempFilter.process(v));
             
             const est = estimateBloodPressure(cleanRecent, 30);
-            if (est.hr > 40 && est.hr < 180) { // Filter crazy values
-                 setEstimatedBP(est);
-            }
+            if (est.hr > 40 && est.hr < 180) setEstimatedBP(est);
          }
          return newCount;
       });
@@ -116,16 +135,12 @@ export default function RecordingTab() {
     
     const fullData = recordedSamplesRef.current.map(s => s.value);
     
-    // Final high-quality estimation
+    // Final high-quality processing
     const filter = new RealTimeFilter();
     const cleanSignal = fullData.map(v => filter.process(v));
     
-    const quality = assessSignalQuality(cleanSignal);
-    setQualityReport(quality);
-
-    const estimate = estimateBloodPressure(cleanSignal, 30);
-    setEstimatedBP(estimate);
-
+    setQualityReport(assessSignalQuality(cleanSignal));
+    setEstimatedBP(estimateBloodPressure(cleanSignal, 30));
     setShowReportModal(true);
   };
 
@@ -157,20 +172,34 @@ export default function RecordingTab() {
   return (
     <div className="w-full flex flex-col bg-background min-h-screen">
       <div className="relative bg-black/80 aspect-video flex items-center justify-center overflow-hidden">
-        <video ref={videoRef} autoPlay playsInline muted className={`w-full h-full object-cover ${cameraPermission === 'denied' ? 'hidden' : ''}`} />
+        {/* VIDEO ELEMENT: Essential attributes for iOS/Mobile */}
+        <video 
+            ref={videoRef} 
+            autoPlay 
+            playsInline // CRITICAL FOR IOS
+            muted // CRITICAL FOR AUTOPLAY
+            className={`w-full h-full object-cover ${cameraPermission === 'denied' ? 'hidden' : ''}`} 
+        />
+        
+        {/* Permission / HTTPS Error Overlay */}
+        {cameraPermission === 'denied' && (
+           <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/90 p-6 text-center">
+             <AlertTriangle className="w-12 h-12 text-yellow-500 mb-2" />
+             <p className="text-white font-bold mb-1">Camera Error</p>
+             <p className="text-sm text-gray-300">{cameraError || "Check permissions and HTTPS"}</p>
+           </div>
+        )}
+
         {isRecording && (
           <div className="absolute top-4 right-4 flex flex-col items-end gap-2 z-20">
             <div className="bg-black/50 p-2 rounded backdrop-blur-sm text-white font-mono font-bold">{formatTime(recordingTime)}</div>
-            
-            {/* Live BP Display */}
             {estimatedBP.hr > 0 && (
-               <div className="bg-emerald-500/90 p-2 rounded backdrop-blur-sm text-xs text-white font-bold animate-in fade-in slide-in-from-right-5">
-                  HR: {estimatedBP.hr} | BP: {estimatedBP.sbp}/{estimatedBP.dbp}
+               <div className="bg-emerald-500/90 p-2 rounded backdrop-blur-sm text-xs text-white font-bold">
+                  HR: {estimatedBP.hr} | {estimatedBP.sbp}/{estimatedBP.dbp}
                </div>
             )}
-
             <div className="bg-black/50 p-2 rounded backdrop-blur-sm text-xs text-gray-300">
-               <Activity className="w-3 h-3 inline mr-1" /> {sampleCount} pts
+               <Activity className="w-3 h-3 inline mr-1" /> {sampleCount}
             </div>
           </div>
         )}
@@ -217,7 +246,7 @@ export default function RecordingTab() {
             </div>
 
             <div className="space-y-4 mb-6">
-               <h3 className="font-semibold text-sm">Calibration</h3>
+               <h3 className="font-semibold text-sm">Calibration / Reference</h3>
                <div className="grid grid-cols-2 gap-4">
                  <div><label className="text-xs block mb-1">Systolic</label><input type="number" value={estimatedBP.sbp} onChange={e=>setEstimatedBP({...estimatedBP, sbp: +e.target.value})} className="w-full bg-background border rounded p-2" /></div>
                  <div><label className="text-xs block mb-1">Diastolic</label><input type="number" value={estimatedBP.dbp} onChange={e=>setEstimatedBP({...estimatedBP, dbp: +e.target.value})} className="w-full bg-background border rounded p-2" /></div>
