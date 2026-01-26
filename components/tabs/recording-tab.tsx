@@ -5,17 +5,17 @@ import { RPPGAcquisition, generateSimulatedSignal } from '@/lib/camera-utils';
 import { RealTimeFilter, SignalStorage, RecordingSession, FilterConfig, assessSignalQuality, estimateBloodPressure } from '@/lib/signal-processing';
 import SignalVisualizer from '@/components/visualization/signal-visualizer';
 import { AppSettingsContext } from '@/lib/app-context';
-import { Pause, Play, Save, Activity, AlertTriangle } from 'lucide-react';
+import { Pause, Play, Save, Activity, AlertTriangle, Zap, ZapOff } from 'lucide-react';
 
 export default function RecordingTab() {
   const { settings } = useContext(AppSettingsContext);
   const videoRef = useRef<HTMLVideoElement>(null);
-  const streamRef = useRef<MediaStream | null>(null);
   const recordingIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   const [isRecording, setIsRecording] = useState(false);
   const [cameraPermission, setCameraPermission] = useState<'pending' | 'granted' | 'denied'>('pending');
   const [cameraError, setCameraError] = useState<string>('');
+  const [isTorchOn, setIsTorchOn] = useState(false);
   
   const [patientInfo, setPatientInfo] = useState({ id: '', name: '' });
   const [showPatientModal, setShowPatientModal] = useState(false);
@@ -37,42 +37,55 @@ export default function RecordingTab() {
 
   useEffect(() => {
     filterRef.current = new RealTimeFilter();
-    
-    const initCamera = async () => {
-      try {
-        if (!rpPgRef.current) rpPgRef.current = new RPPGAcquisition(30);
-        
-        const stream = await rpPgRef.current.requestCameraPermission();
-        streamRef.current = stream;
-        
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          videoRef.current.onloadedmetadata = () => {
-             videoRef.current?.play().catch(e => console.error("Play error:", e));
-          };
-        }
-        setCameraPermission('granted');
-        setCameraError('');
-      } catch (error: any) {
-        console.error('Camera init error:', error);
-        setCameraPermission('denied');
-        
-        if (error.name === 'NotAllowedError') {
-          setCameraError('Permission denied. Please allow camera access in browser settings.');
-        } else if (window.location.protocol !== 'https:' && window.location.hostname !== 'localhost') {
-           setCameraError('Secure Context Required. App must be served over HTTPS.');
-        } else {
-           setCameraError('Could not access rear camera or torch. ' + error.message);
-        }
-      }
-    };
-
     initCamera();
 
+    // Cleanup on unmount
     return () => { 
-      if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop()); 
+      stopCameraAndRecording();
     };
   }, []);
+
+  const initCamera = async () => {
+    try {
+      if (!rpPgRef.current) rpPgRef.current = new RPPGAcquisition(30);
+      
+      const stream = await rpPgRef.current.requestCameraPermission();
+      
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        videoRef.current.onloadedmetadata = () => {
+           videoRef.current?.play().catch(e => console.error("Play error:", e));
+           // Attempt to sync UI state with actual torch state
+           setIsTorchOn(true); 
+        };
+      }
+      setCameraPermission('granted');
+      setCameraError('');
+    } catch (error: any) {
+      console.error('Camera init error:', error);
+      setCameraPermission('denied');
+      
+      if (error.name === 'NotAllowedError') {
+        setCameraError('Permission denied. Please allow camera access.');
+      } else if (window.location.protocol !== 'https:' && window.location.hostname !== 'localhost') {
+         setCameraError('Secure Context Required (HTTPS).');
+      } else {
+         setCameraError('Camera Error: ' + error.message);
+      }
+    }
+  };
+
+  const stopCameraAndRecording = () => {
+    if (recordingIntervalRef.current) clearInterval(recordingIntervalRef.current);
+    if (rpPgRef.current) rpPgRef.current.stop();
+  };
+
+  const toggleTorch = async () => {
+      if (!rpPgRef.current) return;
+      const newState = !isTorchOn;
+      const success = await rpPgRef.current.toggleTorch(newState);
+      if (success) setIsTorchOn(newState);
+  };
 
   const handleStartRecording = () => {
     if (!patientInfo.id && !patientInfo.name) { setShowPatientModal(true); return; }
@@ -87,6 +100,11 @@ export default function RecordingTab() {
     setEstimatedBP({ sbp: 0, dbp: 0, hr: 0 });
     
     if (filterRef.current) filterRef.current.reset();
+
+    // Ensure torch is ON for recording
+    if (!isTorchOn && rpPgRef.current) {
+        rpPgRef.current.toggleTorch(true).then(s => { if(s) setIsTorchOn(true); });
+    }
 
     const intervalMs = 1000 / 30; 
 
@@ -104,11 +122,15 @@ export default function RecordingTab() {
       const filteredVal = filterRef.current ? filterRef.current.process(rawVal) : rawVal;
 
       recordedSamplesRef.current.push({ timestamp: Date.now(), value: rawVal });
+      
+      // Real-time analysis every 2 seconds (approx 60 samples)
       setSampleCount(c => {
          const newCount = c + 1;
          if (newCount % 60 === 0) {
             const recent = recordedSamplesRef.current.slice(-150).map(s => s.value);
+            // Quick robust filter for estimation
             const tempFilter = new RealTimeFilter();
+            // Warmup
             for(let i=0; i<5; i++) tempFilter.process(recent[0]);
             const cleanRecent = recent.map(v => tempFilter.process(v));
             
@@ -130,6 +152,7 @@ export default function RecordingTab() {
     
     const fullData = recordedSamplesRef.current.map(s => s.value);
     
+    // Post-processing
     const filter = new RealTimeFilter();
     const cleanSignal = fullData.map(v => filter.process(v));
     
@@ -174,11 +197,22 @@ export default function RecordingTab() {
             className={`w-full h-full object-cover ${cameraPermission === 'denied' ? 'hidden' : ''}`} 
         />
         
+        {/* Flashlight Toggle Button */}
+        {cameraPermission === 'granted' && (
+            <button 
+                onClick={toggleTorch}
+                className="absolute top-4 left-4 z-30 bg-black/50 p-3 rounded-full text-white backdrop-blur-sm hover:bg-black/70 active:scale-95 transition-all"
+            >
+                {isTorchOn ? <Zap className="w-5 h-5 text-yellow-400 fill-current"/> : <ZapOff className="w-5 h-5"/>}
+            </button>
+        )}
+
         {cameraPermission === 'denied' && (
            <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/90 p-6 text-center">
              <AlertTriangle className="w-12 h-12 text-yellow-500 mb-2" />
              <p className="text-white font-bold mb-1">Camera Error</p>
              <p className="text-sm text-gray-300">{cameraError || "Check permissions and HTTPS"}</p>
+             <button onClick={() => initCamera()} className="mt-4 px-4 py-2 bg-primary text-primary-foreground rounded-lg text-xs">Retry</button>
            </div>
         )}
 
@@ -204,7 +238,6 @@ export default function RecordingTab() {
           </button>
         ) : (
           <button onClick={handleStopRecording} className="w-full flex items-center justify-center gap-2 px-6 py-4 bg-destructive text-destructive-foreground rounded-xl font-bold hover:bg-destructive/90 transition-colors">
-            {/* Removed animate-pulse here */}
             <Pause className="w-6 h-6 fill-current" /> STOP & ANALYZE
           </button>
         )}

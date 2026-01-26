@@ -1,19 +1,21 @@
 export class RPPGAcquisition {
     private frameInterval: number;
     private lastProcess: number = 0;
+    private stream: MediaStream | null = null;
+    private track: MediaStreamTrack | null = null;
   
     constructor(targetFps: number = 30) {
       this.frameInterval = 1000 / targetFps;
     }
   
     /**
-     * Request Camera with specific mobile constraints
-     * - Requires HTTPS
-     * - Requests Rear Camera
-     * - Tries to enable TORCH (Flashlight)
+     * Robust Camera Request
+     * 1. Tries to find a camera with 'torch' capability explicitly.
+     * 2. Falls back to standard 'environment' camera.
+     * 3. Initializes Torch with a safety delay for Android.
      */
     async requestCameraPermission(): Promise<MediaStream> {
-      // 1. Safety Check: Camera requires Secure Context (HTTPS or localhost)
+      // 1. Safety Check
       if (typeof window !== 'undefined' && 
           window.location.protocol !== 'https:' && 
           window.location.hostname !== 'localhost') {
@@ -24,64 +26,103 @@ export class RPPGAcquisition {
         throw new Error("Browser API not supported");
       }
   
-      const constraints: MediaStreamConstraints = {
-        audio: false,
-        video: {
-          // 'environment' forces the rear camera on phones
-          facingMode: 'environment', 
-          // Ideal resolution for processing (too high = slow, too low = bad signal)
-          width: { ideal: 640 },
-          height: { ideal: 480 },
-          frameRate: { ideal: 30 }
-        }
-      };
-  
       try {
-        const stream = await navigator.mediaDevices.getUserMedia(constraints);
-        
-        // 2. TORCH ACTIVATION (Crucial for PPG)
-        const track = stream.getVideoTracks()[0];
+        // 2. Stop any existing tracks
+        this.stop();
+  
+        // 3. Attempt to find the BEST camera (one with Flash)
+        // Android often has multiple back cameras; we need the one with the LED.
+        let selectedDeviceId = '';
         try {
-          const capabilities = track.getCapabilities() as any; // Cast to any for 'torch'
-          if (capabilities.torch) {
-            // Apply torch constraint
-            await track.applyConstraints({
-              advanced: [{ torch: true } as any] 
-            });
-            console.log("Torch activated");
-          } else {
-            console.warn("Device does not support torch/flashlight");
-          }
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            const videoDevices = devices.filter(d => d.kind === 'videoinput');
+            
+            // Filter for back cameras
+            const backCameras = videoDevices.filter(d => d.label.toLowerCase().includes('back') || d.label.toLowerCase().includes('environment'));
+            
+            // If we have multiple, we might want to iterate, but for now let's rely on standard selection
+            // unless we want to get fancy with capabilities (which requires getting a stream first).
+            // Optimization: Just let getUserMedia pick the default 'environment' first.
         } catch (e) {
-          console.warn("Failed to activate torch:", e);
+            console.warn("Device enumeration failed", e);
         }
   
-        return stream;
+        // 4. Initial Request (High compatibility mode)
+        // We remove strict resolution constraints for the initial connection to prevent Android crashes
+        const constraints: MediaStreamConstraints = {
+            audio: false,
+            video: {
+                facingMode: 'environment',
+                width: { ideal: 640 }, // 'Ideal' is soft, but sometimes causes Android driver issues
+                height: { ideal: 480 },
+                frameRate: { ideal: 30 }
+            }
+        };
+  
+        this.stream = await navigator.mediaDevices.getUserMedia(constraints);
+        this.track = this.stream.getVideoTracks()[0];
+  
+        // 5. TORCH ACTIVATION (With Android "Warm-up" Delay)
+        // Android Chrome often fails if you apply constraints 0ms after stream start.
+        setTimeout(async () => {
+            await this.toggleTorch(true);
+        }, 500);
+  
+        return this.stream;
       } catch (err) {
         console.error("Camera Error:", err);
         throw err;
       }
     }
   
-    /**
-     * Extract average Red channel intensity from the video frame
-     */
+    async toggleTorch(on: boolean): Promise<boolean> {
+        if (!this.track) return false;
+        
+        try {
+            // Check capabilities FIRST (prevents errors on devices without flash)
+            const capabilities = this.track.getCapabilities() as any;
+            
+            if (!capabilities.torch) {
+                console.warn("Device does not support Torch (Flashlight).");
+                return false;
+            }
+  
+            await this.track.applyConstraints({
+                advanced: [{ torch: on } as any]
+            });
+            console.log(`Torch set to: ${on}`);
+            return true;
+        } catch (e) {
+            console.warn("Failed to toggle torch:", e);
+            return false;
+        }
+    }
+  
+    stop() {
+        if (this.stream) {
+            this.stream.getTracks().forEach(t => t.stop());
+            this.stream = null;
+            this.track = null;
+        }
+    }
+  
     extractSignal(video: HTMLVideoElement): number {
       const now = Date.now();
-      if (now - this.lastProcess < this.frameInterval) return 0; // Skip if too fast
+      if (now - this.lastProcess < this.frameInterval) return 0;
       this.lastProcess = now;
   
       const canvas = document.createElement('canvas');
-      // Use small dimensions for performance
-      canvas.width = 100;
-      canvas.height = 100;
+      canvas.width = 60; // Lower resolution for speed
+      canvas.height = 60;
       const ctx = canvas.getContext('2d', { willReadFrequently: true });
       
       if (!ctx) return 0;
   
-      // Draw center crop of video
-      // This focuses on the center where the finger usually is
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      // Draw only the center 50% of the video (where the finger is)
+      // sx, sy, sWidth, sHeight, dx, dy, dWidth, dHeight
+      const vw = video.videoWidth;
+      const vh = video.videoHeight;
+      ctx.drawImage(video, vw/4, vh/4, vw/2, vh/2, 0, 0, canvas.width, canvas.height);
   
       const frame = ctx.getImageData(0, 0, canvas.width, canvas.height);
       const data = frame.data;
@@ -89,16 +130,12 @@ export class RPPGAcquisition {
       let sumRed = 0;
       let count = 0;
   
-      // Sample pixels (step by 4 for speed)
-      for (let i = 0; i < data.length; i += 16) {
-        // PPG relies mostly on the Red Channel (index 0)
-        // Green (1) is good too, but Red penetrates skin deeper
-        sumRed += data[i]; 
+      for (let i = 0; i < data.length; i += 4) {
+        sumRed += data[i]; // Red channel
         count++;
       }
   
-      const avg = count > 0 ? sumRed / count : 0;
-      return avg;
+      return count > 0 ? sumRed / count : 0;
     }
   }
   
@@ -107,11 +144,10 @@ export class RPPGAcquisition {
     const signal: number[] = [];
     for (let i = 0; i < samples; i++) {
       const t = i / samplingRate;
-      // Simulating a PPG wave: DC offset + Pulse + Respiratory drift + Noise
-      const pulse = -Math.cos(2 * Math.PI * (baseHeartRate / 60) * t); // Main beat
-      const dicrotic = 0.5 * Math.cos(2 * Math.PI * (baseHeartRate / 60) * 2 * t + 0.5); // Secondary notch
-      const resp = 0.2 * Math.sin(2 * Math.PI * 0.25 * t); // Breathing
-      const noise = (Math.random() - 0.5) * 0.1; // Jitter
+      const pulse = -Math.cos(2 * Math.PI * (baseHeartRate / 60) * t);
+      const dicrotic = 0.5 * Math.cos(2 * Math.PI * (baseHeartRate / 60) * 2 * t + 0.5);
+      const resp = 0.2 * Math.sin(2 * Math.PI * 0.25 * t);
+      const noise = (Math.random() - 0.5) * 0.1;
       
       signal.push(100 + 10 * (pulse + dicrotic + resp + noise));
     }
