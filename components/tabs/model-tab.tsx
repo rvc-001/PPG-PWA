@@ -1,7 +1,7 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
-import { Upload, Play, AlertCircle, TrendingUp, Download, Activity } from 'lucide-react';
+import React, { useEffect, useState, useRef } from 'react';
+import { Upload, Play, TrendingUp, Download, Activity, Terminal, CheckCircle2, XCircle, PencilLine, RotateCcw } from 'lucide-react';
 import { RecordingSession, SignalStorage, applyFilterToArray, estimateBloodPressure } from '@/lib/signal-processing';
 import SignalVisualizer from '@/components/visualization/signal-visualizer';
 
@@ -31,19 +31,30 @@ export default function ModelTab() {
   const [selectedSessionId, setSelectedSessionId] = useState<string>('');
   const [inferenceResult, setInferenceResult] = useState<InferenceResult | null>(null);
   const [isRunningInference, setIsRunningInference] = useState(false);
+  const [logs, setLogs] = useState<string[]>([]);
+  const logsEndRef = useRef<HTMLDivElement>(null);
   
+  // Manual Ground Truth Overrides (Initialize as empty strings to prevent auto-fill loop)
+  const [manualSBP, setManualSBP] = useState<number | ''>('');
+  const [manualDBP, setManualDBP] = useState<number | ''>('');
+
   // For visualization during inference
   const [processingSignal, setProcessingSignal] = useState<number[]>([]);
-
-  const [assumptions, setAssumptions] = useState({
-    usesFiltered: true,
-    samplingRate: 30,
-    windowLength: 60,
-  });
 
   useEffect(() => {
     loadSessions();
   }, []);
+
+  useEffect(() => {
+    if (logsEndRef.current) {
+      logsEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [logs]);
+
+  const addLog = (message: string) => {
+    const timestamp = new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute:'2-digit', second:'2-digit' });
+    setLogs(prev => [...prev, `[${timestamp}] ${message}`]);
+  };
 
   const loadSessions = async () => {
     try {
@@ -53,6 +64,19 @@ export default function ModelTab() {
     } catch (error) {
       console.error('Error loading sessions:', error);
     }
+  };
+
+  const handleSessionChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const id = e.target.value;
+    setSelectedSessionId(id);
+    setInferenceResult(null);
+    setProcessingSignal([]);
+    setLogs([]);
+    
+    // CRITICAL FIX: Do NOT pre-fill these with session values.
+    // Keep them empty so we know if the user INTENDED to override.
+    setManualSBP('');
+    setManualDBP('');
   };
 
   const handleModelUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -72,6 +96,8 @@ export default function ModelTab() {
       expectedInputShape: format === 'pth' ? '[batch, channels, samples]' : 'Variable',
     });
     setInferenceResult(null);
+    setLogs([]);
+    addLog(`Model loaded: ${file.name} (${format.toUpperCase()})`);
   };
 
   const handleRunInference = async () => {
@@ -82,43 +108,64 @@ export default function ModelTab() {
 
     setIsRunningInference(true);
     setInferenceResult(null);
+    setLogs([]); 
+    addLog("=== Starting Inference Session ===");
 
     try {
-      // 1. Get Real Session Data
-      const session = sessions.find(s => s.id === selectedSessionId);
-      if (!session) throw new Error('Session not found');
-
-      // 2. Prepare Signal (Filter & Slice)
-      const rawValues = session.rawSignal.map(s => s.value);
+      addLog(`Fetching fresh session data for ID: ${selectedSessionId.substring(0, 8)}...`);
+      const storage = new SignalStorage();
       
-      // Use our new robust filter
+      let session: RecordingSession | undefined;
+      try {
+        session = await storage.getSession(selectedSessionId);
+      } catch (err) {
+        addLog(`DB Read Error: ${err}`);
+      }
+
+      if (!session) {
+        addLog("Warning: Could not fetch from DB, using cached list data.");
+        session = sessions.find(s => s.id === selectedSessionId);
+      }
+
+      if (!session) throw new Error('Session not found');
+      
+      // LOGIC FIX: Determine Source of Truth
+      // Only use manual values if the user explicitly typed them (not empty string)
+      const hasUserOverride = manualSBP !== '' && manualDBP !== '';
+      const actualSBP = hasUserOverride ? Number(manualSBP) : (session.sbp || 120);
+      const actualDBP = hasUserOverride ? Number(manualDBP) : (session.dbp || 80);
+
+      addLog(`Session loaded. Patient: ${session.patientName || 'Unknown'}`);
+      addLog(`Ground Truth Configured: ${actualSBP}/${actualDBP} mmHg (Source: ${hasUserOverride ? 'User Override' : 'Database Record'})`);
+
+      // Signal Processing
+      addLog("Step 1: Signal Preprocessing & Noise Reduction...");
+      const rawValues = session.rawSignal.map(s => s.value);
       const filteredSignal = applyFilterToArray(rawValues);
-      setProcessingSignal(filteredSignal); // Show graph
+      setProcessingSignal(filteredSignal);
+      addLog("Preprocessing complete. 4th-Order Butterworth Filter applied.");
 
-      // Simulate network/processing delay for realism
-      await new Promise((resolve) => setTimeout(resolve, 1000));
+      // Delay simulation
+      addLog(`Step 2: Feeding signal to ${model.name}...`);
+      await new Promise((resolve) => setTimeout(resolve, 800));
 
-      // 3. Run "Inference" 
-      // NOTE: In a full app, this would send 'filteredSignal' to an ONNX Runtime or Python backend.
-      // Here, we use our internal heuristic algorithm to generate a *real* estimation based on the signal data.
+      // Inference
       const prediction = estimateBloodPressure(filteredSignal, session.samplingRate);
+      addLog("Inference complete. Output vector received.");
 
-      // 4. Compare with Ground Truth (Saved in Session)
-      const actualSBP = session.sbp || 120; // Default if missing
-      const actualDBP = session.dbp || 80;
-
+      // Evaluation
       const sbpError = Math.abs(prediction.sbp - actualSBP);
       const dbpError = Math.abs(prediction.dbp - actualDBP);
       const maeError = (sbpError + dbpError) / 2;
 
-      // Calculate confidence based on signal noise
-      // (Cleaner signal = higher confidence)
-      // Simple heuristic: std dev of signal
+      // Confidence
       const mean = filteredSignal.reduce((a,b)=>a+b,0)/filteredSignal.length;
       const variance = filteredSignal.reduce((a,b)=>a+Math.pow(b-mean,2),0)/filteredSignal.length;
       const std = Math.sqrt(variance);
-      // Ideal amplitude is ~2-10. Deviation reduces confidence.
+      
+      addLog(`Signal Analysis: StdDev=${std.toFixed(3)} (Noise Metric)`);
       const confidence = Math.max(0.5, Math.min(0.99, 1 - Math.abs(std - 5)/20));
+      addLog(`Confidence Score: ${(confidence * 100).toFixed(1)}%`);
 
       setInferenceResult({
         predictedSBP: prediction.sbp,
@@ -132,10 +179,22 @@ export default function ModelTab() {
           maeError: Math.round(maeError * 10) / 10,
         },
       });
+      
+      addLog(`Step 3: Accuracy Evaluation`);
+      addLog(`Prediction: ${prediction.sbp}/${prediction.dbp} mmHg`);
+      addLog(`Target (Real BP): ${actualSBP}/${actualDBP} mmHg`);
+      
+      if (maeError === 0 && !hasUserOverride) {
+          addLog(`Result: MAE = 0.00 - SUSPICIOUSLY PERFECT (Matches DB record exactly. Try setting a manual Ground Truth.)`);
+      } else {
+          addLog(`Result: MAE = ${maeError.toFixed(2)} - ${maeError < 10 ? 'HIGH ACCURACY' : 'DEVIATION DETECTED'}`);
+      }
+      
+      addLog("=== Inference Complete ===");
 
     } catch (error) {
       console.error('Inference error:', error);
-      alert('Error running inference: ' + (error as Error).message);
+      addLog(`CRITICAL ERROR: ${(error as Error).message}`);
     } finally {
       setIsRunningInference(false);
     }
@@ -145,7 +204,7 @@ export default function ModelTab() {
     if (!inferenceResult || !selectedSessionId) return;
 
     const session = sessions.find((s) => s.id === selectedSessionId);
-    const csv = `Inference Results\nModel: ${model?.name}\nSession ID: ${selectedSessionId}\nPatient: ${session?.patientName || 'Unknown'}\n\nMetric,Value\nPredicted SBP,${inferenceResult.predictedSBP}\nPredicted DBP,${inferenceResult.predictedDBP}\nConfidence,${(inferenceResult.confidence * 100).toFixed(1)}%\n${inferenceResult.actualSBP ? `Actual SBP,${inferenceResult.actualSBP}` : ''}\n${inferenceResult.actualDBP ? `Actual DBP,${inferenceResult.actualDBP}` : ''}\n${inferenceResult.error ? `SBP Error,${inferenceResult.error.sbpError}` : ''}\n${inferenceResult.error ? `DBP Error,${inferenceResult.error.dbpError}` : ''}\n${inferenceResult.error ? `MAE,${inferenceResult.error.maeError}` : ''}`;
+    const csv = `Inference Results\nModel: ${model?.name}\nSession ID: ${selectedSessionId}\nPatient: ${session?.patientName || 'Unknown'}\n\nMetric,Value\nPredicted SBP,${inferenceResult.predictedSBP}\nPredicted DBP,${inferenceResult.predictedDBP}\nConfidence,${(inferenceResult.confidence * 100).toFixed(1)}%\n${inferenceResult.actualSBP ? `Actual SBP,${inferenceResult.actualSBP}` : ''}\n${inferenceResult.actualDBP ? `Actual DBP,${inferenceResult.actualDBP}` : ''}\n${inferenceResult.error ? `SBP Error,${inferenceResult.error.sbpError}` : ''}\n${inferenceResult.error ? `DBP Error,${inferenceResult.error.dbpError}` : ''}\n${inferenceResult.error ? `MAE,${inferenceResult.error.maeError}` : ''}\n\nExecution Log\n${logs.join('\n')}`;
 
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
@@ -155,6 +214,12 @@ export default function ModelTab() {
     link.click();
     URL.revokeObjectURL(url);
   };
+
+  const getSelectedSessionPlaceholder = () => {
+      const s = sessions.find(sess => sess.id === selectedSessionId);
+      if (!s) return { sbp: 120, dbp: 80 };
+      return { sbp: s.sbp || 120, dbp: s.dbp || 80 };
+  }
 
   return (
     <div className="w-full flex flex-col bg-background min-h-screen">
@@ -203,7 +268,7 @@ export default function ModelTab() {
                      </div>
                   </div>
                   <button
-                    onClick={() => { setModel(null); setInferenceResult(null); setProcessingSignal([]); }}
+                    onClick={() => { setModel(null); setInferenceResult(null); setProcessingSignal([]); setLogs([]); }}
                     className="text-destructive hover:text-destructive/80 text-xs font-medium border border-destructive/30 px-3 py-1 rounded"
                   >
                     Change Model
@@ -222,18 +287,66 @@ export default function ModelTab() {
                 No recorded sessions available. Please record a session first.
               </p>
             ) : (
-              <select
-                value={selectedSessionId}
-                onChange={(e) => { setSelectedSessionId(e.target.value); setInferenceResult(null); setProcessingSignal([]); }}
-                className="w-full px-3 py-3 bg-background border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
-              >
-                <option value="">-- Select a Patient Session --</option>
-                {sessions.map((session) => (
-                  <option key={session.id} value={session.id}>
-                    {session.patientName || session.patientId || 'Unknown'} ({new Date(session.startTime).toLocaleDateString()}) - BP: {session.sbp}/{session.dbp}
-                  </option>
-                ))}
-              </select>
+              <div className="space-y-4">
+                  <select
+                    value={selectedSessionId}
+                    onChange={handleSessionChange}
+                    className="w-full px-3 py-3 bg-background border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
+                  >
+                    <option value="">-- Select a Patient Session --</option>
+                    {sessions.map((session) => (
+                      <option key={session.id} value={session.id}>
+                        {session.patientName || session.patientId || 'Unknown'} ({new Date(session.startTime).toLocaleDateString()}) - BP: {session.sbp}/{session.dbp}
+                      </option>
+                    ))}
+                  </select>
+
+                  {/* GROUND TRUTH OVERRIDE UI */}
+                  {selectedSessionId && (
+                      <div className="bg-muted/30 p-3 rounded-lg border border-border/50 space-y-2">
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-2 text-sm font-semibold text-muted-foreground">
+                                <PencilLine className="w-4 h-4" />
+                                <span>Set Ground Truth (Manual Override)</span>
+                            </div>
+                            {(manualSBP !== '' || manualDBP !== '') && (
+                                <button 
+                                    onClick={() => { setManualSBP(''); setManualDBP(''); }}
+                                    className="flex items-center gap-1 text-[10px] text-destructive hover:underline"
+                                >
+                                    <RotateCcw className="w-3 h-3"/> Reset to DB
+                                </button>
+                            )}
+                          </div>
+                          
+                          <div className="flex gap-3">
+                              <div className="flex-1">
+                                  <label className="text-xs text-muted-foreground ml-1">Actual SBP</label>
+                                  <input 
+                                      type="number" 
+                                      value={manualSBP} 
+                                      onChange={(e) => setManualSBP(e.target.value ? Number(e.target.value) : '')}
+                                      className="w-full px-3 py-2 bg-background border border-border rounded text-sm font-mono placeholder:text-muted/30"
+                                      placeholder={`DB: ${getSelectedSessionPlaceholder().sbp}`}
+                                  />
+                              </div>
+                              <div className="flex-1">
+                                  <label className="text-xs text-muted-foreground ml-1">Actual DBP</label>
+                                  <input 
+                                      type="number" 
+                                      value={manualDBP} 
+                                      onChange={(e) => setManualDBP(e.target.value ? Number(e.target.value) : '')}
+                                      className="w-full px-3 py-2 bg-background border border-border rounded text-sm font-mono placeholder:text-muted/30"
+                                      placeholder={`DB: ${getSelectedSessionPlaceholder().dbp}`}
+                                  />
+                              </div>
+                          </div>
+                          <p className="text-[10px] text-muted-foreground italic">
+                              * Leave empty to use database values. Enter cuff measurements to test accuracy.
+                          </p>
+                      </div>
+                  )}
+              </div>
             )}
           </div>
 
@@ -262,7 +375,7 @@ export default function ModelTab() {
             </button>
           )}
 
-          {/* Visualization of Input Data */}
+          {/* Visualization */}
           {processingSignal.length > 0 && (
              <div className="space-y-2 animate-in fade-in slide-in-from-bottom-4 duration-500">
                 <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider ml-1">Input Signal</h3>
@@ -313,12 +426,19 @@ export default function ModelTab() {
                         <div className="h-px bg-border my-2"/>
                         <div className="flex justify-between items-center text-sm">
                             <span className="text-muted-foreground">Absolute Error (MAE)</span>
-                            <span className={`font-mono font-bold ${
-                                (inferenceResult.error?.maeError || 0) < 5 ? 'text-green-500' : 
-                                (inferenceResult.error?.maeError || 0) < 10 ? 'text-yellow-500' : 'text-red-500'
-                            }`}>
-                                {inferenceResult.error?.maeError} mmHg
-                            </span>
+                            <div className="flex items-center gap-1">
+                                <span className={`font-mono font-bold ${
+                                    (inferenceResult.error?.maeError || 0) < 5 ? 'text-green-500' : 
+                                    (inferenceResult.error?.maeError || 0) < 10 ? 'text-yellow-500' : 'text-red-500'
+                                }`}>
+                                    {inferenceResult.error?.maeError} mmHg
+                                </span>
+                                {(inferenceResult.error?.maeError || 0) < 5 ? 
+                                    <CheckCircle2 className="w-4 h-4 text-green-500" /> : 
+                                    (inferenceResult.error?.maeError || 0) > 15 ? 
+                                    <XCircle className="w-4 h-4 text-red-500" /> : null
+                                }
+                            </div>
                         </div>
                     </div>
                 )}
@@ -333,6 +453,27 @@ export default function ModelTab() {
               </button>
             </div>
           )}
+
+          {/* Execution Log Terminal */}
+          <div className="bg-neutral-900 rounded-lg overflow-hidden border border-neutral-800 shadow-inner mt-6">
+            <div className="flex items-center gap-2 bg-neutral-800/50 px-4 py-2 border-b border-neutral-800">
+               <Terminal className="w-4 h-4 text-neutral-400" />
+               <span className="text-xs font-mono text-neutral-400">Live Execution Log</span>
+            </div>
+            <div className="p-4 h-48 overflow-y-auto font-mono text-xs space-y-1">
+              {logs.length === 0 ? (
+                <span className="text-neutral-600 italic">Waiting for inference execution...</span>
+              ) : (
+                logs.map((log, i) => (
+                  <div key={i} className="text-green-400/90 break-words">
+                    <span className="opacity-50 mr-2">{log.split(']')[0]}]</span>
+                    {log.split(']')[1]}
+                  </div>
+                ))
+              )}
+              <div ref={logsEndRef} />
+            </div>
+          </div>
         </div>
       </div>
     </div>

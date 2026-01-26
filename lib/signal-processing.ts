@@ -200,6 +200,7 @@ export function generateMIMICCSV(session: RecordingSession, start?: number, end?
 export class SignalStorage {
   private dbName = 'SignalMonitorDB';
   private storeName = 'recordings';
+  
   async init(): Promise<IDBDatabase> {
     return new Promise((res, rej) => {
       const r = indexedDB.open(this.dbName, 1);
@@ -208,27 +209,44 @@ export class SignalStorage {
       r.onupgradeneeded = (e: any) => { e.target.result.createObjectStore(this.storeName, { keyPath: 'id' }); };
     });
   }
+  
   async saveSession(s: RecordingSession) {
     const db = await this.init();
     return new Promise<void>((res, rej) => {
       const tx = db.transaction(this.storeName, 'readwrite');
       tx.objectStore(this.storeName).put(s);
       tx.oncomplete = () => res();
+      tx.onerror = () => rej(tx.error);
     });
   }
+  
   async getSessions(): Promise<RecordingSession[]> {
     const db = await this.init();
     return new Promise((res, rej) => {
       const req = db.transaction(this.storeName, 'readonly').objectStore(this.storeName).getAll();
       req.onsuccess = () => res(req.result);
+      req.onerror = () => rej(req.error);
     });
   }
+
+  // --- NEW METHOD ADDED HERE ---
+  async getSession(id: string): Promise<RecordingSession | undefined> {
+    const db = await this.init();
+    return new Promise((res, rej) => {
+      const req = db.transaction(this.storeName, 'readonly').objectStore(this.storeName).get(id);
+      req.onsuccess = () => res(req.result);
+      req.onerror = () => rej(req.error);
+    });
+  }
+  // -----------------------------
+
   async deleteSession(id: string) {
     const db = await this.init();
     return new Promise<void>((res, rej) => {
       const tx = db.transaction(this.storeName, 'readwrite');
       tx.objectStore(this.storeName).delete(id);
       tx.oncomplete = () => res();
+      tx.onerror = () => rej(tx.error);
     });
   }
 }
