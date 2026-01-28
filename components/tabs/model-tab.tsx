@@ -1,24 +1,18 @@
 'use client';
 
 import React, { useEffect, useState, useRef } from 'react';
-import { Upload, Play, TrendingUp, Download, Activity, FileCode, PencilLine, RotateCcw } from 'lucide-react';
-import { RecordingSession, SignalStorage, applyFilterToArray, estimateBloodPressure } from '@/lib/signal-processing';
+import { Upload, Play, TrendingUp, Download, Activity, FileCode, PencilLine, RotateCcw, Layers } from 'lucide-react';
+import { RecordingSession, SignalStorage, applyFilterToArray } from '@/lib/signal-processing';
 import SignalVisualizer from '@/components/visualization/signal-visualizer';
+import * as ort from 'onnxruntime-web';
 
-// --- Global Type Definition for ONNX Runtime ---
-declare global {
-  interface Window {
-    ort: any;
-  }
-}
+// Configure ONNX Runtime to look for WASM files in the public directory
+ort.env.wasm.wasmPaths = "/"; 
 
-// --- Types ---
 interface ModelInfo {
   name: string;
-  format: 'onnx' | 'tflite' | 'pth' | 'pkl' | 'unknown';
   size: number;
   uploadedAt: Date;
-  fileData: ArrayBuffer;
 }
 
 interface InferenceResult {
@@ -34,15 +28,18 @@ interface InferenceResult {
   };
   inferenceTimeMs: number;
   executionBackend: string;
+  windowsProcessed: number; // New metric to show how many segments we averaged
 }
 
 export default function ModelTab() {
-  const [model, setModel] = useState<ModelInfo | null>(null);
+  const [modelInfo, setModelInfo] = useState<ModelInfo | null>(null);
+  const [session, setSession] = useState<ort.InferenceSession | null>(null);
   const [sessions, setSessions] = useState<RecordingSession[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState<string>('');
   const [inferenceResult, setInferenceResult] = useState<InferenceResult | null>(null);
   const [isRunningInference, setIsRunningInference] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
+  const [progress, setProgress] = useState(0); // Progress bar for sliding window
   const logsEndRef = useRef<HTMLDivElement>(null);
   
   // Ground Truth Overrides
@@ -64,6 +61,7 @@ export default function ModelTab() {
       setSessions(data.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime()));
     } catch (error) {
       console.error('Error loading sessions:', error);
+      addLog("Error loading recording sessions.");
     }
   };
 
@@ -72,170 +70,132 @@ export default function ModelTab() {
     if (!file) return;
 
     const ext = file.name.split('.').pop()?.toLowerCase();
-    let format: ModelInfo['format'] = 'unknown';
+    
+    if (ext !== 'onnx') {
+      alert("Invalid format. Only .ONNX models are supported.");
+      return;
+    }
 
-    if (ext === 'onnx') format = 'onnx';
-    else if (ext === 'tflite') format = 'tflite';
-    else if (['pth', 'pt'].includes(ext || '')) format = 'pth';
-    else if (ext === 'pkl') format = 'pkl';
-
-    const buffer = await file.arrayBuffer();
-
-    setModel({
-      name: file.name,
-      format,
-      size: file.size,
-      uploadedAt: new Date(),
-      fileData: buffer
-    });
-
-    setInferenceResult(null);
     setLogs([]);
-    addLog(`Model Loaded: ${file.name}`);
-    addLog(`Format: ${format.toUpperCase()} | Size: ${(file.size / 1024).toFixed(1)} KB`);
+    addLog(`Loading Model: ${file.name}...`);
+    setIsRunningInference(true);
 
-    if (format === 'pth' || format === 'pkl') {
-      addLog(`⚠️ NOTE: .${format} is a Python format.`);
-      addLog(`   Browsers cannot run this natively. App will run in SIMULATION MODE.`);
-    }
-    if (format === 'tflite') {
-        addLog(`⚠️ NOTE: Native TFLite disabled.`);
-        addLog(`   Using Simulation Mode for .tflite files.`);
-    }
-  };
-
-  // --- HELPER: Inject CDN Script ---
-  const loadONNXRuntime = async () => {
-    if (window.ort) return window.ort; // Already loaded
-
-    return new Promise((resolve, reject) => {
-      addLog("Downloading ONNX Runtime Engine (CDN)...");
-      const script = document.createElement("script");
-      script.src = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/ort.min.js";
-      script.async = true;
-      script.onload = () => {
-        addLog("Engine Downloaded.");
-        resolve(window.ort);
-      };
-      script.onerror = () => reject(new Error("Failed to load ONNX Runtime from CDN"));
-      document.body.appendChild(script);
-    });
-  };
-
-  // --- ENGINE 1: ONNX RUNTIME (CDN INJECTION) ---
-  const runONNX = async (modelData: ArrayBuffer, signal: number[]) => {
-    // 1. Ensure Library is Loaded
-    const ort = await loadONNXRuntime();
-
-    // 2. Configure Environment (Force Single-Thread + CDN WASM)
-    // This prevents "Unknown CPU Vendor" and threading crashes
-    ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/";
-    ort.env.wasm.numThreads = 1; 
-    ort.env.wasm.simd = false;   
-    ort.env.wasm.proxy = false; 
-
-    addLog(`Config: Single-Thread Mode. WASM source set.`);
-
-    // 3. Create Session
-    const session = await ort.InferenceSession.create(modelData, { 
+    try {
+      const buffer = await file.arrayBuffer();
+      const newSession = await ort.InferenceSession.create(buffer, {
         executionProviders: ['wasm'],
-        graphOptimizationLevel: 'basic',
-        executionMode: 'sequential'
-    });
-    
-    addLog(`Session Ready. Input: "${session.inputNames[0]}"`);
+        graphOptimizationLevel: 'all',
+      });
 
-    // 4. Preprocess (120 Samples)
-    const INPUT_LEN = 120;
-    const float32Data = new Float32Array(INPUT_LEN);
-    if (signal.length >= INPUT_LEN) {
-        float32Data.set(signal.slice(0, INPUT_LEN));
-    } else {
-        float32Data.set(signal);
+      setSession(newSession);
+      setModelInfo({
+        name: file.name,
+        size: file.size,
+        uploadedAt: new Date(),
+      });
+
+      addLog(`Model Loaded Successfully.`);
+      addLog(`Input Nodes: ${newSession.inputNames.join(', ')}`);
+      
+    } catch (err) {
+      console.error(err);
+      addLog(`CRITICAL ERROR: Failed to load model.`);
+      addLog(`${(err as Error).message}`);
+      setSession(null);
+      setModelInfo(null);
+    } finally {
+      setIsRunningInference(false);
     }
-    
-    // 5. Create Tensor
-    const tensor = new ort.Tensor('float32', float32Data, [1, 1, INPUT_LEN]);
-    const start = performance.now();
-    
-    // 6. Run Inference
-    const results = await session.run({ [session.inputNames[0]]: tensor });
-    const end = performance.now();
-
-    // 7. Parse
-    const outputName = session.outputNames[0];
-    const outputData = results[outputName].data as Float32Array;
-    
-    return { sbp: outputData[0], dbp: outputData[1], time: end - start, backend: 'ONNX/WASM (CDN)' };
   };
 
-  // --- ENGINE 2: SIMULATION / FALLBACK ---
-  const runSimulation = async (signal: number[], format: string, samplingRate: number) => {
-    addLog(`⚠️ BACKEND: Native execution for .${format} is unavailable.`);
-    addLog("   Running heuristic fallback (Simulation Mode)...");
-    
-    await new Promise(r => setTimeout(r, 1200)); 
-    
-    const heuristic = estimateBloodPressure(signal, samplingRate);
-    
-    return { 
-      sbp: heuristic.sbp, 
-      dbp: heuristic.dbp, 
-      time: 1200, 
-      backend: `SIMULATION (${format})` 
-    };
-  };
-
-  const handleRunInference = async () => {
-    if (!model || !selectedSessionId) return;
+  const runInferencePipeline = async () => {
+    if (!session || !selectedSessionId) return;
     setIsRunningInference(true);
     setInferenceResult(null);
-    setLogs([]); 
-    addLog("=== Starting Inference Pipeline ===");
+    setProgress(0);
+    addLog("=== Starting Sliding Window Inference ===");
 
     try {
       const storage = new SignalStorage();
-      let session = await storage.getSession(selectedSessionId);
-      if (!session) session = sessions.find(s => s.id === selectedSessionId);
-      if (!session) throw new Error("Session not found");
+      let record = await storage.getSession(selectedSessionId);
+      if (!record) record = sessions.find(s => s.id === selectedSessionId);
+      if (!record) throw new Error("Session data not found");
 
-      // Ground Truth
+      // 1. Ground Truth Setup
       const useOverride = manualSBP !== '' && manualDBP !== '';
-      const actualSBP = useOverride ? Number(manualSBP) : (session.sbp || 120);
-      const actualDBP = useOverride ? Number(manualDBP) : (session.dbp || 80);
+      const actualSBP = useOverride ? Number(manualSBP) : (record.sbp || 120);
+      const actualDBP = useOverride ? Number(manualDBP) : (record.dbp || 80);
 
-      addLog(`Patient: ${session.patientName || 'Unknown'} | GT: ${actualSBP}/${actualDBP}`);
+      addLog(`Patient: ${record.patientName || 'Unknown'} | GT: ${actualSBP}/${actualDBP}`);
 
-      // Preprocessing
-      const filtered = applyFilterToArray(session.rawSignal.map(s => s.value));
-      setProcessingSignal(filtered);
-      addLog("Signal Preprocessed (4Hz Butterworth LowPass)");
+      // 2. Preprocessing
+      const fullSignal = applyFilterToArray(record.rawSignal.map(s => s.value));
+      addLog(`Signal Length: ${fullSignal.length} samples (${(fullSignal.length/30).toFixed(1)}s)`);
 
-      // Routing
-      let res;
-      if (model.format === 'onnx') {
-        res = await runONNX(model.fileData, filtered);
-      } else {
-        res = await runSimulation(filtered, model.format, session.samplingRate);
+      // 3. Sliding Window Setup
+      const WINDOW_SIZE = 120; // Model Requirement (4 seconds)
+      const STRIDE = 30;       // Step size (1 second) -> Overlapping windows
+      
+      if (fullSignal.length < WINDOW_SIZE) {
+        throw new Error(`Signal too short. Need ${WINDOW_SIZE} samples, got ${fullSignal.length}`);
       }
 
-      addLog(`Success! Backend: ${res.backend}`);
-      addLog(`Output: [${res.sbp.toFixed(1)}, ${res.dbp.toFixed(1)}] mmHg`);
+      const predictions: {sbp: number, dbp: number}[] = [];
+      const inputName = session.inputNames[0];
+      const outputName = session.outputNames[0];
+      
+      const startTime = performance.now();
+      
+      // 4. Run Loop
+      const totalWindows = Math.floor((fullSignal.length - WINDOW_SIZE) / STRIDE) + 1;
+      addLog(`Processing ${totalWindows} windows...`);
 
-      // Metrics
-      const sbpError = Math.abs(res.sbp - actualSBP);
-      const dbpError = Math.abs(res.dbp - actualDBP);
+      for (let i = 0; i <= fullSignal.length - WINDOW_SIZE; i += STRIDE) {
+        // Update progress UI every few frames
+        if (i % (STRIDE * 5) === 0) {
+          setProgress(Math.round((i / fullSignal.length) * 100));
+          await new Promise(r => setTimeout(r, 0)); // Yield to UI
+        }
+
+        // Slice Window
+        const windowData = new Float32Array(fullSignal.slice(i, i + WINDOW_SIZE));
+        
+        // Create Tensor [1, 1, 120]
+        const tensor = new ort.Tensor('float32', windowData, [1, 1, WINDOW_SIZE]);
+        
+        // Run Inference
+        const results = await session.run({ [inputName]: tensor });
+        const output = results[outputName].data as Float32Array;
+        
+        predictions.push({ sbp: output[0], dbp: output[1] });
+      }
+
+      const endTime = performance.now();
+      
+      // 5. Aggregate Results (Average)
+      // Filter outliers (optional: simple mean for now)
+      const avgSBP = predictions.reduce((a, b) => a + b.sbp, 0) / predictions.length;
+      const avgDBP = predictions.reduce((a, b) => a + b.dbp, 0) / predictions.length;
+
+      addLog(`Processed ${predictions.length} windows in ${(endTime - startTime).toFixed(0)}ms`);
+      addLog(`Average Output: [${avgSBP.toFixed(1)}, ${avgDBP.toFixed(1)}]`);
+
+      // Visualization: Show the first window just for reference
+      setProcessingSignal(fullSignal.slice(0, WINDOW_SIZE));
+
+      // 6. Metrics
+      const sbpError = Math.abs(avgSBP - actualSBP);
+      const dbpError = Math.abs(avgDBP - actualDBP);
       const mae = (sbpError + dbpError) / 2;
 
-      // Noise Confidence
-      const mean = filtered.reduce((a,b)=>a+b,0)/filtered.length;
-      const std = Math.sqrt(filtered.reduce((a,b) => a + Math.pow(b - mean, 2), 0) / filtered.length);
-      const conf = Math.max(0.5, Math.min(0.99, 1 - Math.abs(std - 0.15) * 2));
+      // Confidence based on stability (Standard Deviation of predictions)
+      const sbpVariance = predictions.reduce((a, b) => a + Math.pow(b.sbp - avgSBP, 2), 0) / predictions.length;
+      const stability = Math.max(0, 1 - Math.sqrt(sbpVariance) / 20); // Heuristic
 
       setInferenceResult({
-        predictedSBP: Math.round(res.sbp),
-        predictedDBP: Math.round(res.dbp),
-        confidence: Number(conf.toFixed(2)),
+        predictedSBP: Math.round(avgSBP),
+        predictedDBP: Math.round(avgDBP),
+        confidence: Number(stability.toFixed(2)),
         actualSBP,
         actualDBP,
         error: {
@@ -243,25 +203,27 @@ export default function ModelTab() {
           dbpError: Number(dbpError.toFixed(1)),
           maeError: Number(mae.toFixed(1))
         },
-        inferenceTimeMs: res.time,
-        executionBackend: res.backend
+        inferenceTimeMs: endTime - startTime,
+        executionBackend: 'ONNX/WASM (Sliding Window)',
+        windowsProcessed: predictions.length
       });
 
     } catch (e) {
       console.error(e);
-      addLog(`CRITICAL ERROR: ${(e as Error).message}`);
+      addLog(`ERROR: ${(e as Error).message}`);
     } finally {
       setIsRunningInference(false);
+      setProgress(100);
     }
   };
 
   const exportCSV = () => {
     if (!inferenceResult || !selectedSessionId) return;
-    const csv = `Metric,Value\nBackend,${inferenceResult.executionBackend}\nPred SBP,${inferenceResult.predictedSBP}\nPred DBP,${inferenceResult.predictedDBP}\nMAE,${inferenceResult.error?.maeError}`;
+    const csv = `Metric,Value\nBackend,${inferenceResult.executionBackend}\nWindows,${inferenceResult.windowsProcessed}\nPred SBP,${inferenceResult.predictedSBP}\nPred DBP,${inferenceResult.predictedDBP}\nMAE,${inferenceResult.error?.maeError}`;
     const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
     const a = document.createElement('a');
     a.href = url;
-    a.download = `inference_${Date.now()}.csv`;
+    a.download = `inference_avg_${Date.now()}.csv`;
     a.click();
   };
 
@@ -269,7 +231,7 @@ export default function ModelTab() {
     <div className="w-full flex flex-col bg-background min-h-screen">
       <div className="p-4 border-b border-border">
         <h1 className="text-2xl font-bold">Inference Engine</h1>
-        <p className="text-sm text-muted-foreground">Run ONNX & ML models in-browser</p>
+        <p className="text-sm text-muted-foreground">Run ONNX models locally in-browser</p>
       </div>
 
       <div className="flex-1 overflow-auto pb-20 p-4 space-y-4">
@@ -280,28 +242,27 @@ export default function ModelTab() {
             <Upload className="w-5 h-5" /> Load Model
           </h2>
 
-          {!model ? (
+          {!session ? (
             <label className="border-2 border-dashed border-border rounded-lg p-8 flex flex-col items-center justify-center cursor-pointer hover:bg-accent/5 transition-colors">
-              <input type="file" onChange={handleModelUpload} accept=".onnx,.tflite,.pth,.pkl" className="hidden" />
+              <input type="file" onChange={handleModelUpload} accept=".onnx" className="hidden" />
               <FileCode className="w-10 h-10 text-muted-foreground mb-2" />
-              <p className="font-medium">Click to Upload Model</p>
-              <p className="text-xs text-muted-foreground mt-1">Recommended: .ONNX</p>
+              <p className="font-medium">Click to Upload .ONNX Model</p>
+              <p className="text-xs text-muted-foreground mt-1">Other formats (.tflite, .pth) not supported</p>
             </label>
           ) : (
             <div className="bg-muted/20 border border-border rounded p-3 flex justify-between items-center">
               <div className="flex items-center gap-3">
-                <div className={`p-2 rounded ${model.format === 'onnx' ? 'bg-green-100 dark:bg-green-900 text-green-700 dark:text-green-300' : 'bg-orange-100 dark:bg-orange-900 text-orange-700 dark:text-orange-300'}`}>
+                <div className="p-2 rounded bg-green-100 dark:bg-green-900 text-green-700 dark:text-green-300">
                   <Activity className="w-5 h-5"/>
                 </div>
                 <div>
-                  <div className="font-bold text-sm">{model.name}</div>
+                  <div className="font-bold text-sm">{modelInfo?.name}</div>
                   <div className="text-xs text-muted-foreground flex items-center gap-2">
-                    {model.format.toUpperCase()} • {(model.size/1024).toFixed(0)}KB
-                    {model.format !== 'onnx' && <span className="text-orange-600 dark:text-orange-300 bg-orange-100 dark:bg-orange-900/50 px-1 rounded text-[10px]">SIMULATION</span>}
+                    ONNX Runtime Ready • {modelInfo ? (modelInfo.size/1024).toFixed(0) : 0}KB
                   </div>
                 </div>
               </div>
-              <button onClick={() => setModel(null)} className="text-xs text-destructive hover:underline">Remove</button>
+              <button onClick={() => { setSession(null); setModelInfo(null); }} className="text-xs text-destructive hover:underline">Remove</button>
             </div>
           )}
         </div>
@@ -334,19 +295,26 @@ export default function ModelTab() {
         </div>
 
         {/* Action & Vis */}
-        {model && selectedSessionId && (
-          <button 
-            onClick={handleRunInference}
-            disabled={isRunningInference}
-            className="w-full bg-primary text-primary-foreground p-4 rounded-xl font-bold flex justify-center items-center gap-2 shadow-lg hover:opacity-90 disabled:opacity-50 transition-all"
-          >
-            {isRunningInference ? <div className="animate-spin w-5 h-5 border-2 border-current border-t-transparent rounded-full"/> : <Play className="w-5 h-5 fill-current"/>}
-            Run Inference
-          </button>
-        )}
-
-        {processingSignal.length > 0 && (
-          <SignalVisualizer rawSignal={[]} filteredSignal={processingSignal} title="Input Tensor Visualization" color="emerald" height={80} />
+        {session && selectedSessionId && (
+          <div className="space-y-2">
+             <button 
+                onClick={runInferencePipeline}
+                disabled={isRunningInference}
+                className="w-full bg-primary text-primary-foreground p-4 rounded-xl font-bold flex justify-center items-center gap-2 shadow-lg hover:opacity-90 disabled:opacity-50 transition-all"
+            >
+                {isRunningInference ? (
+                    <div className="flex items-center gap-2">
+                         <div className="animate-spin w-4 h-4 border-2 border-white/50 border-t-white rounded-full"/>
+                         <span>Processing ({progress}%)</span>
+                    </div>
+                ) : (
+                    <>
+                        <Layers className="w-5 h-5"/> Run Sliding Window Inference
+                    </>
+                )}
+            </button>
+            {isRunningInference && <div className="h-1 w-full bg-muted overflow-hidden rounded"><div className="h-full bg-primary transition-all duration-300" style={{width: `${progress}%`}}/></div>}
+          </div>
         )}
 
         {/* Results */}
@@ -355,9 +323,11 @@ export default function ModelTab() {
             <div className="flex justify-between items-start mb-4">
               <div>
                 <h3 className="font-bold text-lg flex items-center gap-2">
-                  <TrendingUp className="w-5 h-5 text-green-500"/> Results
+                  <TrendingUp className="w-5 h-5 text-green-500"/> Results (Averaged)
                 </h3>
-                <span className="text-[10px] bg-muted px-1 rounded text-muted-foreground">Backend: {inferenceResult.executionBackend}</span>
+                <span className="text-[10px] bg-muted px-1 rounded text-muted-foreground">
+                    Processed {inferenceResult.windowsProcessed} Windows ({inferenceResult.executionBackend})
+                </span>
               </div>
               <div className={`text-xl font-mono font-bold ${inferenceResult.error && inferenceResult.error.maeError < 8 ? 'text-green-500' : 'text-amber-500'}`}>
                 MAE: {inferenceResult.error?.maeError}
@@ -366,7 +336,7 @@ export default function ModelTab() {
 
             <div className="grid grid-cols-2 gap-3 mb-4">
               <div className="bg-background p-3 rounded border text-center">
-                <div className="text-xs text-muted-foreground uppercase">Predicted</div>
+                <div className="text-xs text-muted-foreground uppercase">Predicted (Avg)</div>
                 <div className="text-2xl font-bold text-primary">{inferenceResult.predictedSBP}/{inferenceResult.predictedDBP}</div>
               </div>
               <div className="bg-background p-3 rounded border text-center">
