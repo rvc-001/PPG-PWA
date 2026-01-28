@@ -1,12 +1,13 @@
 'use client';
 
 import React, { useEffect, useState, useRef } from 'react';
-import { Upload, Play, TrendingUp, Download, Activity, FileCode, PencilLine, RotateCcw, Layers } from 'lucide-react';
+import { Upload, Play, TrendingUp, Download, Activity, FileCode, PencilLine, RotateCcw, Layers, HelpCircle, AlertCircle } from 'lucide-react';
 import { RecordingSession, SignalStorage, applyFilterToArray } from '@/lib/signal-processing';
 import SignalVisualizer from '@/components/visualization/signal-visualizer';
 import * as ort from 'onnxruntime-web';
 
 // Configure ONNX Runtime to look for WASM files in the public directory
+// Ensure you have run: npm run copy:onnx
 ort.env.wasm.wasmPaths = "/"; 
 
 interface ModelInfo {
@@ -28,7 +29,7 @@ interface InferenceResult {
   };
   inferenceTimeMs: number;
   executionBackend: string;
-  windowsProcessed: number; // New metric to show how many segments we averaged
+  windowsProcessed: number;
 }
 
 export default function ModelTab() {
@@ -39,7 +40,7 @@ export default function ModelTab() {
   const [inferenceResult, setInferenceResult] = useState<InferenceResult | null>(null);
   const [isRunningInference, setIsRunningInference] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
-  const [progress, setProgress] = useState(0); // Progress bar for sliding window
+  const [progress, setProgress] = useState(0); 
   const logsEndRef = useRef<HTMLDivElement>(null);
   
   // Ground Truth Overrides
@@ -71,6 +72,7 @@ export default function ModelTab() {
 
     const ext = file.name.split('.').pop()?.toLowerCase();
     
+    // Strict enforcement: Only ONNX
     if (ext !== 'onnx') {
       alert("Invalid format. Only .ONNX models are supported.");
       return;
@@ -82,6 +84,8 @@ export default function ModelTab() {
 
     try {
       const buffer = await file.arrayBuffer();
+      
+      // Initialize Session immediately (compile model)
       const newSession = await ort.InferenceSession.create(buffer, {
         executionProviders: ['wasm'],
         graphOptimizationLevel: 'all',
@@ -152,7 +156,7 @@ export default function ModelTab() {
 
       for (let i = 0; i <= fullSignal.length - WINDOW_SIZE; i += STRIDE) {
         // Update progress UI every few frames
-        if (i % (STRIDE * 5) === 0) {
+        if (i % (STRIDE * 2) === 0) {
           setProgress(Math.round((i / fullSignal.length) * 100));
           await new Promise(r => setTimeout(r, 0)); // Yield to UI
         }
@@ -173,7 +177,6 @@ export default function ModelTab() {
       const endTime = performance.now();
       
       // 5. Aggregate Results (Average)
-      // Filter outliers (optional: simple mean for now)
       const avgSBP = predictions.reduce((a, b) => a + b.sbp, 0) / predictions.length;
       const avgDBP = predictions.reduce((a, b) => a + b.dbp, 0) / predictions.length;
 
@@ -238,9 +241,32 @@ export default function ModelTab() {
         
         {/* Upload Card */}
         <div className="bg-card border border-border rounded-lg p-4">
-          <h2 className="font-semibold mb-4 flex items-center gap-2">
-            <Upload className="w-5 h-5" /> Load Model
-          </h2>
+          <div className="flex justify-between items-center mb-4">
+            <h2 className="font-semibold flex items-center gap-2">
+              <Upload className="w-5 h-5" /> Load Model
+            </h2>
+            
+            {/* Help Tooltip */}
+            <div className="group relative">
+                <button className="text-muted-foreground hover:text-primary transition-colors">
+                    <HelpCircle className="w-5 h-5" />
+                </button>
+                <div className="absolute right-0 top-6 w-72 p-3 bg-popover border border-border rounded shadow-xl text-xs z-50 hidden group-hover:block animate-in fade-in slide-in-from-top-2">
+                    <p className="font-bold mb-2">Supported Format: .ONNX</p>
+                    <p className="mb-2 text-muted-foreground">
+                        Browsers cannot run raw Python (.pth) files. 
+                        Please convert your model first.
+                    </p>
+                    <a 
+                      href="/scripts/convert_to_onnx.py" 
+                      download="convert_to_onnx.py"
+                      className="block text-center w-full bg-primary text-primary-foreground py-1 rounded hover:opacity-90"
+                    >
+                      <Download className="w-3 h-3 inline mr-1"/> Download Converter Script
+                    </a>
+                </div>
+            </div>
+          </div>
 
           {!session ? (
             <label className="border-2 border-dashed border-border rounded-lg p-8 flex flex-col items-center justify-center cursor-pointer hover:bg-accent/5 transition-colors">
