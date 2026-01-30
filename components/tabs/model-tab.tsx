@@ -137,7 +137,7 @@ export default function ModelTab() {
       addLog(`Signal Length: ${fullSignal.length} samples (${(fullSignal.length/30).toFixed(1)}s)`);
 
       // 3. Sliding Window Setup
-      const WINDOW_SIZE = 120; // Model Requirement (4 seconds)
+      const WINDOW_SIZE = 1250; // Model Requirement (4 seconds)
       const STRIDE = 30;       // Step size (1 second) -> Overlapping windows
       
       if (fullSignal.length < WINDOW_SIZE) {
@@ -163,9 +163,12 @@ export default function ModelTab() {
 
         // Slice Window
         const windowData = new Float32Array(fullSignal.slice(i, i + WINDOW_SIZE));
+        const twoChannelData = new Float32Array(WINDOW_SIZE * 2);
+         twoChannelData.set(windowData); // Channel 1
+         twoChannelData.set(windowData, WINDOW_SIZE); // Channel 2 (Duplicate)
         
         // Create Tensor [1, 1, 120]
-        const tensor = new ort.Tensor('float32', windowData, [1, 1, WINDOW_SIZE]);
+        const tensor = new ort.Tensor('float32', twoChannelData, [1, 2, WINDOW_SIZE]);
         
         // Run Inference
         const results = await session.run({ [inputName]: tensor });
