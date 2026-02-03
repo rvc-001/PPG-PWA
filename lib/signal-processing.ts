@@ -96,6 +96,7 @@ export class RealTimeFilter {
 
     return filtered;
   }
+  // REMOVED GARBAGE METHOD HERE
 }
 
 /**
@@ -229,7 +230,6 @@ export class SignalStorage {
     });
   }
 
-  // --- NEW METHOD ADDED HERE ---
   async getSession(id: string): Promise<RecordingSession | undefined> {
     const db = await this.init();
     return new Promise((res, rej) => {
@@ -238,13 +238,23 @@ export class SignalStorage {
       req.onerror = () => rej(req.error);
     });
   }
-  // -----------------------------
 
   async deleteSession(id: string) {
     const db = await this.init();
     return new Promise<void>((res, rej) => {
       const tx = db.transaction(this.storeName, 'readwrite');
       tx.objectStore(this.storeName).delete(id);
+      tx.oncomplete = () => res();
+      tx.onerror = () => rej(tx.error);
+    });
+  }
+
+  // --- ADDED METHOD ---
+  async clearAll() {
+    const db = await this.init();
+    return new Promise<void>((res, rej) => {
+      const tx = db.transaction(this.storeName, 'readwrite');
+      tx.objectStore(this.storeName).clear();
       tx.oncomplete = () => res();
       tx.onerror = () => rej(tx.error);
     });

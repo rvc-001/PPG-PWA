@@ -1,267 +1,208 @@
 'use client';
 
-import { useContext, useState } from 'react';
-import { Moon, Sun, AlertCircle } from 'lucide-react';
-import { AppSettingsContext } from '@/lib/app-context';
+import React, { useState, useEffect } from 'react';
+import { 
+  Settings, 
+  Trash2, 
+  Moon, 
+  Sun, 
+  Monitor, 
+  Info, 
+  Github, 
+  Database, 
+  AlertTriangle,
+  CheckCircle2
+} from 'lucide-react';
+import { useTheme } from 'next-themes';
 import { SignalStorage } from '@/lib/signal-processing';
 
-interface SettingsTabProps {
-  isDarkMode: boolean;
-  setIsDarkMode: (value: boolean) => void;
-}
-
-export default function SettingsTab({ isDarkMode, setIsDarkMode }: SettingsTabProps) {
-  const { settings, updateSettings } = useContext(AppSettingsContext);
-  const [showClearConfirm, setShowClearConfirm] = useState(false);
+export default function SettingsTab() {
+  const { theme, setTheme } = useTheme();
+  const [mounted, setMounted] = useState(false);
   const [clearStatus, setClearStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
+  const [storageUsage, setStorageUsage] = useState<string>('Checking...');
 
-  const handleFilterUpdate = (field: string, value: number) => {
-    const newFilterConfig = {
-      ...settings.filterConfig,
-      [field]: value,
-    };
-    updateSettings({ filterConfig: newFilterConfig });
-  };
+  // Prevent hydration mismatch
+  useEffect(() => {
+    setMounted(true);
+    checkStorage();
+  }, []);
 
-  const handleGraphPreferenceUpdate = (key: string, value: boolean) => {
-    updateSettings({
-      graphPreferences: {
-        ...settings.graphPreferences,
-        [key]: value,
-      },
-    });
-  };
-
-  const handleClearData = async () => {
-    setClearStatus('loading');
+  const checkStorage = async () => {
     try {
       const storage = new SignalStorage();
-      await storage.clearAll();
-      setClearStatus('success');
-      setTimeout(() => {
-        setClearStatus('idle');
-        setShowClearConfirm(false);
-      }, 2000);
-    } catch (error) {
-      console.error('Error clearing data:', error);
-      setClearStatus('error');
-      setTimeout(() => setClearStatus('idle'), 3000);
+      const sessions = await storage.getSessions();
+      setStorageUsage(`${sessions.length} recordings stored`);
+    } catch (e) {
+      setStorageUsage('Unknown');
     }
   };
 
+  const handleClearData = async () => {
+    // 1. Safety Check
+    if (!window.confirm("⚠️ ARE YOU SURE?\n\nThis will permanently delete ALL recorded signals and patient data. This action cannot be undone.")) {
+      return;
+    }
+
+    try {
+      setClearStatus('loading');
+      
+      // 2. Perform Deletion
+      const storage = new SignalStorage();
+      await storage.clearAll();
+      
+      // 3. Update UI
+      setClearStatus('success');
+      setStorageUsage('0 recordings stored');
+      
+      // Reset status after 3 seconds
+      setTimeout(() => {
+        setClearStatus('idle');
+      }, 3000);
+
+    } catch (error) {
+      console.error(error);
+      setClearStatus('error');
+    }
+  };
+
+  if (!mounted) return null;
+
   return (
-    <div className="w-full h-full flex flex-col bg-background">
-      <div className="p-4 border-b border-border">
-        <h1 className="text-2xl font-bold">Settings</h1>
+    <div className="flex flex-col h-screen max-h-[80vh] bg-background">
+      {/* Header */}
+      <div className="p-4 border-b border-border space-y-1">
+        <h1 className="text-2xl font-bold flex items-center gap-2">
+          <Settings className="w-6 h-6 text-primary" /> Settings
+        </h1>
+        <p className="text-xs text-muted-foreground">
+          Preferences • Data Management • About
+        </p>
       </div>
 
-      <div className="flex-1 overflow-auto">
-        <div className="p-4 space-y-6 pb-24">
-          {/* Theme Toggle */}
-          <div className="bg-card border border-border rounded-lg p-4">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                {settings.theme === 'dark' ? (
-                  <Moon className="w-5 h-5 text-primary" />
-                ) : (
-                  <Sun className="w-5 h-5 text-primary" />
-                )}
-                <div>
-                  <h3 className="font-semibold">Theme</h3>
-                  <p className="text-sm text-muted-foreground">{settings.theme === 'dark' ? 'Dark mode' : 'Light mode'}</p>
-                </div>
+      <div className="flex-1 overflow-y-auto p-4 space-y-6">
+        
+        {/* Theme Section */}
+        <section className="space-y-3">
+          <h2 className="text-sm font-semibold text-foreground uppercase tracking-wider">Appearance</h2>
+          <div className="bg-card border border-border rounded-lg p-1 flex">
+            <button
+              onClick={() => setTheme('light')}
+              className={`flex-1 flex items-center justify-center gap-2 p-2 rounded-md text-sm transition-all ${theme === 'light' ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:bg-muted'}`}
+            >
+              <Sun className="w-4 h-4" /> Light
+            </button>
+            <button
+              onClick={() => setTheme('dark')}
+              className={`flex-1 flex items-center justify-center gap-2 p-2 rounded-md text-sm transition-all ${theme === 'dark' ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:bg-muted'}`}
+            >
+              <Moon className="w-4 h-4" /> Dark
+            </button>
+            <button
+              onClick={() => setTheme('system')}
+              className={`flex-1 flex items-center justify-center gap-2 p-2 rounded-md text-sm transition-all ${theme === 'system' ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:bg-muted'}`}
+            >
+              <Monitor className="w-4 h-4" /> System
+            </button>
+          </div>
+        </section>
+
+        {/* Data Management Section */}
+        <section className="space-y-3">
+          <h2 className="text-sm font-semibold text-foreground uppercase tracking-wider">Data Management</h2>
+          <div className="bg-card border border-border rounded-lg p-4 space-y-4">
+            
+            <div className="flex items-center gap-3">
+              <div className="bg-blue-100 dark:bg-blue-900 p-2 rounded-full">
+                <Database className="w-5 h-5 text-blue-600 dark:text-blue-300" />
               </div>
+              <div className="flex-1">
+                <div className="font-medium text-sm">Local Storage</div>
+                <div className="text-xs text-muted-foreground">{storageUsage}</div>
+              </div>
+            </div>
+
+            <div className="h-px bg-border" />
+
+            <div className="space-y-2">
               <button
-                onClick={() => {
-                  const newTheme = settings.theme === 'dark' ? 'light' : 'dark';
-                  updateSettings({ theme: newTheme });
-                }}
-                className="relative inline-flex h-8 w-14 items-center rounded-full bg-muted transition-colors focus:outline-none focus:ring-2 focus:ring-primary/50"
-                role="switch"
-                aria-checked={settings.theme === 'dark'}
+                onClick={handleClearData}
+                disabled={clearStatus === 'loading' || clearStatus === 'success'}
+                className={`w-full flex items-center justify-center gap-2 p-3 rounded-lg border text-sm font-medium transition-colors ${
+                  clearStatus === 'success' 
+                    ? 'bg-green-100 border-green-200 text-green-700 dark:bg-green-900/30 dark:border-green-800 dark:text-green-400'
+                    : 'bg-red-50 dark:bg-red-900/10 border-red-200 dark:border-red-900/50 text-red-600 dark:text-red-400 hover:bg-red-100 dark:hover:bg-red-900/20'
+                }`}
               >
-                <span
-                  className={`inline-block h-6 w-6 transform rounded-full bg-background transition-transform ${
-                    settings.theme === 'dark' ? 'translate-x-7' : 'translate-x-1'
-                  }`}
-                />
+                {clearStatus === 'idle' && (
+                  <>
+                    <Trash2 className="w-4 h-4" /> Delete All Data
+                  </>
+                )}
+                {clearStatus === 'loading' && (
+                  <>
+                    <span className="animate-spin rounded-full h-4 w-4 border-b-2 border-current"></span> Deleting...
+                  </>
+                )}
+                {clearStatus === 'success' && (
+                  <>
+                    <CheckCircle2 className="w-4 h-4" /> Data Cleared
+                  </>
+                )}
+                {clearStatus === 'error' && (
+                  <>
+                    <AlertTriangle className="w-4 h-4" /> Error - Try Again
+                  </>
+                )}
               </button>
-            </div>
-          </div>
-
-          {/* Recording Speed Control */}
-          <div className="bg-card border border-border rounded-lg p-4">
-            <h3 className="font-semibold mb-4">Recording Speed Control</h3>
-            <div className="space-y-4">
-              <div>
-                <label className="text-sm font-medium block mb-2">
-                  Playback Speed: {settings.recordingSpeed.toFixed(2)}x
-                </label>
-                <p className="text-xs text-muted-foreground mb-3">
-                  Adjusts how fast signal acquisition runs. 1.0x = real-time physiological data capture.
-                </p>
-                <div className="flex gap-2">
-                  {[0.25, 0.5, 1, 1.5, 2].map((speed) => (
-                    <button
-                      key={speed}
-                      onClick={() => updateSettings({ recordingSpeed: speed })}
-                      className={`px-3 py-1 rounded text-sm font-medium transition-colors ${
-                        settings.recordingSpeed === speed
-                          ? 'bg-primary text-primary-foreground'
-                          : 'bg-muted text-muted-foreground hover:bg-muted/80'
-                      }`}
-                    >
-                      {speed}x
-                    </button>
-                  ))}
-                </div>
-                <div className="mt-3 p-2 bg-background rounded text-xs text-muted-foreground">
-                  <p>
-                    <strong>Note:</strong> At 1.0x, a 60-second recording captures 1,800 samples (30 Hz × 60s),
-                    matching clinical MIMIC-III standards.
-                  </p>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Signal Processing Settings */}
-          <div className="bg-card border border-border rounded-lg p-4">
-            <h3 className="font-semibold mb-4 flex items-center gap-2">
-              <span>Signal Processing</span>
-              <span className="text-xs font-normal text-muted-foreground">(Butterworth Filter)</span>
-            </h3>
-            <div className="space-y-4">
-              <div>
-                <label className="text-sm font-medium block mb-1">
-                  Low Cutoff Frequency: {settings.filterConfig.lowCutoff} Hz
-                </label>
-                <input
-                  type="range"
-                  min="0.1"
-                  max="10"
-                  step="0.1"
-                  value={settings.filterConfig.lowCutoff}
-                  onChange={(e) => handleFilterUpdate('lowCutoff', parseFloat(e.target.value))}
-                  className="w-full"
-                />
-                <p className="text-xs text-muted-foreground mt-1">Removes very low frequency drift</p>
-              </div>
-
-              <div>
-                <label className="text-sm font-medium block mb-1">
-                  High Cutoff Frequency: {settings.filterConfig.highCutoff} Hz
-                </label>
-                <input
-                  type="range"
-                  min="10"
-                  max="500"
-                  step="1"
-                  value={settings.filterConfig.highCutoff}
-                  onChange={(e) => handleFilterUpdate('highCutoff', parseFloat(e.target.value))}
-                  className="w-full"
-                />
-                <p className="text-xs text-muted-foreground mt-1">Removes high-frequency noise</p>
-              </div>
-
-              <div>
-                <label className="text-sm font-medium block mb-1">
-                  Filter Order: {settings.filterConfig.order}
-                </label>
-                <input
-                  type="range"
-                  min="1"
-                  max="10"
-                  value={settings.filterConfig.order}
-                  onChange={(e) => handleFilterUpdate('order', parseInt(e.target.value))}
-                  className="w-full"
-                />
-                <p className="text-xs text-muted-foreground mt-1">Higher order = steeper rolloff</p>
-              </div>
-
-              <p className="text-xs text-muted-foreground px-3 py-2 bg-background rounded border border-border italic">
-                Sampling Rate: {settings.filterConfig.samplingRate} Hz (fixed)
+              <p className="text-[10px] text-muted-foreground text-center">
+                This action is irreversible. All patient recordings will be lost.
               </p>
             </div>
           </div>
+        </section>
 
-          {/* Graph Preferences */}
-          <div className="bg-card border border-border rounded-lg p-4">
-            <h3 className="font-semibold mb-4">Graph Preferences</h3>
-            <div className="space-y-3">
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={settings.graphPreferences.showGrid}
-                  onChange={(e) => handleGraphPreferenceUpdate('showGrid', e.target.checked)}
-                  className="w-4 h-4 rounded"
-                />
-                <span className="text-sm">Show grid lines</span>
-              </label>
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={settings.graphPreferences.autoScale}
-                  onChange={(e) => handleGraphPreferenceUpdate('autoScale', e.target.checked)}
-                  className="w-4 h-4 rounded"
-                />
-                <span className="text-sm">Auto-scale graphs</span>
-              </label>
-            </div>
-          </div>
-
-          {/* Data Management */}
-          <div className="bg-card border border-border rounded-lg p-4">
-            <h3 className="font-semibold mb-4">Data Management</h3>
-            {!showClearConfirm ? (
-              <button
-                onClick={() => setShowClearConfirm(true)}
-                className="w-full px-4 py-2 bg-destructive/10 text-destructive hover:bg-destructive/20 rounded-md transition-colors text-sm font-medium"
-              >
-                Clear All Local Data
-              </button>
-            ) : (
-              <div className="space-y-3 p-3 bg-destructive/10 rounded-md border border-destructive/30">
-                <div className="flex items-start gap-2">
-                  <AlertCircle className="w-5 h-5 text-destructive mt-0.5 flex-shrink-0" />
-                  <p className="text-sm">This will permanently delete all recorded sessions. This action cannot be undone.</p>
-                </div>
-                <div className="flex gap-2 pt-2">
-                  <button
-                    onClick={handleClearData}
-                    disabled={clearStatus === 'loading'}
-                    className="flex-1 px-3 py-2 bg-destructive text-destructive-foreground hover:bg-destructive/90 rounded-md text-sm font-medium disabled:opacity-50 transition-colors"
-                  >
-                    {clearStatus === 'loading' ? 'Clearing...' : 'Yes, Clear Data'}
-                  </button>
-                  <button
-                    onClick={() => setShowClearConfirm(false)}
-                    disabled={clearStatus === 'loading'}
-                    className="flex-1 px-3 py-2 bg-background border border-border text-foreground hover:bg-background/80 rounded-md text-sm font-medium disabled:opacity-50 transition-colors"
-                  >
-                    Cancel
-                  </button>
-                </div>
-                {clearStatus === 'success' && (
-                  <p className="text-xs text-accent text-center">Data cleared successfully</p>
-                )}
-                {clearStatus === 'error' && (
-                  <p className="text-xs text-destructive text-center">Error clearing data</p>
-                )}
+        {/* About Section */}
+        <section className="space-y-3">
+          <h2 className="text-sm font-semibold text-foreground uppercase tracking-wider">About</h2>
+          <div className="bg-card border border-border rounded-lg p-4 space-y-3">
+            <div className="flex items-center gap-3 mb-2">
+              <div className="bg-primary/10 p-2 rounded-lg">
+                <Info className="w-5 h-5 text-primary" />
               </div>
-            )}
-          </div>
+              <div>
+                <h3 className="font-bold text-sm">PPG Inference PWA</h3>
+                <p className="text-xs text-muted-foreground">v1.0.0 (Beta)</p>
+              </div>
+            </div>
+            
+            <p className="text-xs text-muted-foreground leading-relaxed">
+              A progressive web application for real-time PPG signal acquisition and client-side ONNX inference. Designed for privacy-first, offline-capable medical research.
+            </p>
 
-          {/* App Info */}
-          <div className="bg-card border border-border rounded-lg p-4">
-            <h3 className="font-semibold mb-2">About</h3>
-            <div className="space-y-1 text-xs text-muted-foreground">
-              <p>Signal Monitor v1.0</p>
-              <p>Medical-grade physiological signal acquisition and analysis</p>
-              <p>MIMIC-III aligned data format</p>
+            <div className="grid grid-cols-2 gap-2 pt-2">
+              <a 
+                href="https://github.com" 
+                target="_blank" 
+                rel="noreferrer"
+                className="flex items-center justify-center gap-2 p-2 bg-muted/50 hover:bg-muted rounded text-xs font-medium transition-colors"
+              >
+                <Github className="w-3 h-3" /> Source Code
+              </a>
+              <div className="flex items-center justify-center gap-2 p-2 bg-muted/20 rounded text-xs font-medium text-muted-foreground cursor-default">
+                MIT License
+              </div>
             </div>
           </div>
+        </section>
+
+        {/* Footer */}
+        <div className="text-center py-4">
+          <p className="text-[10px] text-muted-foreground/50">
+            Running locally on your device. <br/> No data is sent to the cloud.
+          </p>
         </div>
+
       </div>
     </div>
   );
