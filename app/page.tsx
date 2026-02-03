@@ -12,7 +12,7 @@ type TabType = 'recording' | 'history' | 'model' | 'settings';
 
 export default function Home() {
   const [activeTab, setActiveTab] = useState<TabType>('recording');
-  const [isDarkMode, setIsDarkMode] = useState(true);
+  // Removed unused isDarkMode state; theme is now handled by next-themes in SettingsTab/Layout
   const [appSettings, setAppSettings] = useState<AppSettings>(defaultSettings);
 
   useEffect(() => {
@@ -23,6 +23,9 @@ export default function Home() {
         const parsed = JSON.parse(savedSettings);
         setAppSettings(parsed);
         // Apply theme
+        // Note: This manual theme application might conflict with next-themes used in SettingsTab.
+        // It is kept here to maintain legacy behavior if appSettings.theme is set, 
+        // but generally next-themes should handle this automatically.
         applyTheme(parsed.theme || 'dark');
       } catch (error) {
         console.error('[v0] Failed to load settings:', error);
@@ -64,7 +67,8 @@ export default function Home() {
       case 'model':
         return <ModelTab />;
       case 'settings':
-        return <SettingsTab isDarkMode={isDarkMode} setIsDarkMode={setIsDarkMode} />;
+        // Fix: Removed props that do not exist on the component
+        return <SettingsTab />;
       default:
         return null;
     }
