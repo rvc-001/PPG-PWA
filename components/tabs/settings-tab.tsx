@@ -181,17 +181,6 @@ export default function SettingsTab() {
             </p>
 
             <div className="grid grid-cols-2 gap-2 pt-2">
-              <a 
-                href="https://github.com" 
-                target="_blank" 
-                rel="noreferrer"
-                className="flex items-center justify-center gap-2 p-2 bg-muted/50 hover:bg-muted rounded text-xs font-medium transition-colors"
-              >
-                <Github className="w-3 h-3" /> Source Code
-              </a>
-              <div className="flex items-center justify-center gap-2 p-2 bg-muted/20 rounded text-xs font-medium text-muted-foreground cursor-default">
-                MIT License
-              </div>
             </div>
           </div>
         </section>

@@ -6,15 +6,15 @@ import PWARegister from '@/components/pwa/pwa-register'
 import { ThemeProvider } from '@/components/theme-provider' //
 import './globals.css'
 
-const _geist = Geist({ subsets: ["latin"] });
-const _geistMono = Geist_Mono({ subsets: ["latin"] });
-
+const _geist = Geist({ subsets: ["latin"], variable: "--font-sans" });
+const _geistMono = Geist_Mono({ subsets: ["latin"], variable: "--font-mono" });
 export const viewport: Viewport = {
   width: 'device-width',
   initialScale: 1,
   maximumScale: 1,
   userScalable: false,
-  colorScheme: 'dark',
+  // Remove or change this line:
+  // colorScheme: 'dark', 
   themeColor: '#0f172a',
 }
 
