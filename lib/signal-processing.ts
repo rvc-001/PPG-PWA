@@ -10,6 +10,9 @@ export interface SignalSample {
 
 export interface FilterConfig {
   samplingRate: number; // Hz (e.g. 30)
+  lowCutoff?: number;
+  highCutoff?: number;
+  order?: number;
 }
 
 export interface RecordingSession {
@@ -96,7 +99,6 @@ export class RealTimeFilter {
 
     return filtered;
   }
-  // REMOVED GARBAGE METHOD HERE
 }
 
 /**
@@ -249,7 +251,6 @@ export class SignalStorage {
     });
   }
 
-  // --- ADDED METHOD ---
   async clearAll() {
     const db = await this.init();
     return new Promise<void>((res, rej) => {
