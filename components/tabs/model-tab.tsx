@@ -1,16 +1,14 @@
 'use client';
 
 import React, { useEffect, useState, useRef } from 'react';
-import { Upload, TrendingUp, FileCode, Layers, Play, AlertCircle, RotateCcw, Settings2, Wand2, Activity } from 'lucide-react';
+import { Upload, TrendingUp, FileCode, Layers, Play, AlertCircle, RotateCcw, Settings2, Wand2, Activity, Microscope } from 'lucide-react';
 import { RecordingSession, SignalStorage, applyFilterToArray } from '@/lib/signal-processing';
 import * as ort from 'onnxruntime-web';
 
 // --- CONFIGURATION ---
-// 1. Point to public root for WASM files
-// 2. Remove 'numThreads = 1' to allow utilizing the threaded WASM file you have
 if (typeof window !== 'undefined') {
   ort.env.wasm.wasmPaths = "/"; 
-  // We do NOT set numThreads here, allowing it to auto-detect the available threaded backend
+  // No numThreads set (auto-detect)
 }
 
 interface InferenceResult {
@@ -33,12 +31,12 @@ export default function ModelTab() {
   const [progress, setProgress] = useState(0); 
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  // --- CONFIG STATE (Visible) ---
+  // --- CONFIG STATE ---
   const [windowSize, setWindowSize] = useState<number>(1250);
   const [inputMode, setInputMode] = useState<'FLAT' | 'CH_1' | 'CH_2'>('FLAT');
-  const [isAutoConfigured, setIsAutoConfigured] = useState(false);
+  const [configStatus, setConfigStatus] = useState<string>("Waiting for model...");
   
-  // Manual Ground Truth Overrides
+  // Manual Overrides
   const [manualSBP, setManualSBP] = useState<number | ''>('');
   const [manualDBP, setManualDBP] = useState<number | ''>('');
 
@@ -60,12 +58,11 @@ export default function ModelTab() {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    // Reset State
     setErrorMsg(null);
     setInferenceResult(null);
-    setIsAutoConfigured(false);
     setSession(null);
     setLogs([]);
+    setConfigStatus("Analyzing model structure...");
 
     if (!file.name.endsWith('.onnx')) {
       setErrorMsg("Invalid file. Please upload a .onnx model.");
@@ -76,15 +73,11 @@ export default function ModelTab() {
     setIsRunning(true);
 
     try {
-      // CHECK: Environment Capabilities
       if (typeof SharedArrayBuffer === 'undefined') {
-        addLog("WARN: SharedArrayBuffer not available. Threaded WASM may fail.");
+        addLog("WARN: SharedArrayBuffer missing. Performance may degrade.");
       }
 
       const buffer = await file.arrayBuffer();
-      
-      // Attempt Session Creation
-      addLog("Initializing ONNX Backend...");
       const s = await ort.InferenceSession.create(buffer, {
         executionProviders: ['wasm'], 
         graphOptimizationLevel: 'all',
@@ -92,49 +85,61 @@ export default function ModelTab() {
 
       setSession(s);
       
-      // --- AUTO-DETECTION LOGIC ---
+      // --- IMPROVED AUTO-DETECTION LOGIC ---
       try {
         const inputName = s.inputNames[0];
         // @ts-ignore
         const meta = s.inputMetadata?.[inputName] || {}; 
         const dims = meta.dimensions || [];
-        addLog(`Metadata Shape: [${dims.join(', ')}]`);
+        
+        addLog(`Raw Dimensions Detected: [${dims.map((d:any) => d?.toString() || '?').join(', ')}]`);
 
-        let detectedSize = 1250; 
-        let detectedMode: 'FLAT' | 'CH_1' | 'CH_2' = 'FLAT';
-        let foundConfig = false;
+        let newSize = 1250; // Default
+        let newMode: 'FLAT' | 'CH_1' | 'CH_2' = 'FLAT';
+        let sizeFound = false;
 
-        // Extract largest dimension as Time Steps
-        const largestDim = Math.max(...(dims.filter((d:any) => typeof d === 'number') as number[]));
-        if (largestDim > 10) {
-          detectedSize = largestDim;
-          foundConfig = true;
-        }
-
-        // Infer Mode
+        // 1. Detect Mode (Channels)
+        // If Rank 3 (e.g. [1, 1, 1000] or [1, 2, 1000])
         if (dims.length === 3) {
-           const channelDim = dims[1]; 
-           if (channelDim === 2) detectedMode = 'CH_2';
-           else detectedMode = 'CH_1'; 
+           const dim1 = Number(dims[1]);
+           if (dim1 === 2) newMode = 'CH_2';
+           else newMode = 'CH_1'; // Default to 1 channel if unknown or 1
+        } else {
+           newMode = 'FLAT'; // Rank 2 (e.g. [1, 1000])
         }
 
-        setWindowSize(detectedSize);
-        setInputMode(detectedMode);
-        setIsAutoConfigured(foundConfig);
+        // 2. Detect Size (Time Steps)
+        // Look for the largest fixed number > 10.
+        // Ignore -1 (dynamic), 1 (batch), 2 (channel)
+        const candidates = dims.filter((d: any) => typeof d === 'number' && d > 10);
+        if (candidates.length > 0) {
+            newSize = Math.max(...(candidates as number[]));
+            sizeFound = true;
+        }
 
-        if (foundConfig) addLog(`✅ Auto-Set: ${detectedMode} / ${detectedSize}`);
-        else addLog(`⚠️ Shape ambiguous. Using defaults.`);
+        // Apply Findings
+        setWindowSize(newSize);
+        setInputMode(newMode);
+
+        if (sizeFound) {
+            setConfigStatus(`Auto-Configured: ${newMode} / ${newSize}`);
+            addLog(`✅ Locked to model requirements: ${newSize} samples.`);
+        } else {
+            // If we found the mode but not the size (dynamic model)
+            setConfigStatus(`Partial Config: ${newMode} / Dynamic Size`);
+            addLog(`⚠️ Model accepts dynamic size. Defaulting to ${newSize}. Please adjust if needed.`);
+        }
 
       } catch (metaErr) {
         console.warn("Metadata read error", metaErr);
-        addLog("Could not read metadata. Please configure manually below.");
+        addLog("Metadata unreadable. Please set manually.");
+        setConfigStatus("Manual Configuration Required");
       }
 
     } catch (err) {
       const msg = (err as Error).message;
       setErrorMsg(`Model Load Failed: ${msg}`);
-      addLog(`FATAL ERROR: ${msg}`);
-      addLog("Tip: Check if 'ort-wasm.wasm' is in /public or if headers are enabled.");
+      addLog(`FATAL: ${msg}`);
     } finally {
       setIsRunning(false);
     }
@@ -159,7 +164,6 @@ export default function ModelTab() {
     setProgress(0);
 
     try {
-      // 1. Prepare Data
       const storage = new SignalStorage();
       let record = await storage.getSession(selectedSessionId);
       if (!record) record = sessions.find(s => s.id === selectedSessionId);
@@ -169,9 +173,8 @@ export default function ModelTab() {
       const actualSBP = manualSBP !== '' ? Number(manualSBP) : (record.sbp || 120);
       const actualDBP = manualDBP !== '' ? Number(manualDBP) : (record.dbp || 80);
 
-      if (fullSignal.length < windowSize) throw new Error(`Recording (${fullSignal.length}) too short for model (${windowSize}).`);
+      if (fullSignal.length < windowSize) throw new Error(`Signal too short (${fullSignal.length}) for window (${windowSize}).`);
 
-      // 2. Inference Loop
       const inputName = session.inputNames[0];
       const outputName = session.outputNames[0];
       const stride = Math.max(1, Math.floor(windowSize / 4));
@@ -188,12 +191,22 @@ export default function ModelTab() {
         const results = await session.run({ [inputName]: tensor });
         const out = results[outputName].data as Float32Array;
         
-        predictions.push({ s: out[0] || 120, d: out[1] || (out.length > 2 ? out[2] : 80) });
+        // Handle variable output shapes (scalar vs array)
+        let s = 120, d = 80;
+        if (out.length >= 2) {
+            s = out[0];
+            d = out[1];
+        } else if (out.length === 1) {
+            // Some models output flattened [SBP, DBP] across batch
+            s = out[0]; 
+            d = 80; // Fallback
+        }
+        
+        predictions.push({ s, d });
       }
 
-      if (!predictions.length) throw new Error("No valid windows found.");
+      if (!predictions.length) throw new Error("No predictions.");
 
-      // 3. Results
       const avgS = predictions.reduce((sum, p) => sum + p.s, 0) / predictions.length;
       const avgD = predictions.reduce((sum, p) => sum + p.d, 0) / predictions.length;
       const mae = (Math.abs(avgS - actualSBP) + Math.abs(avgD - actualDBP)) / 2;
@@ -221,7 +234,7 @@ export default function ModelTab() {
         <h1 className="text-2xl font-bold flex items-center gap-2">
           <Wand2 className="w-6 h-6 text-primary"/> Model Analysis
         </h1>
-        <p className="text-xs text-muted-foreground">Upload ONNX • Verify Config • Run</p>
+        <p className="text-xs text-muted-foreground">Upload ONNX • Auto-Config • Run</p>
       </div>
 
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
@@ -232,13 +245,12 @@ export default function ModelTab() {
           </div>
         )}
 
-        {/* UPLOAD SECTION */}
+        {/* UPLOAD */}
         <div className="bg-card border border-border rounded-lg p-6 border-dashed text-center">
           {!session ? (
              <label className="cursor-pointer flex flex-col items-center p-4 hover:bg-accent/5 rounded transition w-full">
                <Upload className="w-10 h-10 text-muted-foreground mb-2"/>
                <span className="font-semibold">Upload Model (.onnx)</span>
-               <span className="text-xs text-muted-foreground">Required for inference</span>
                <input type="file" accept=".onnx" onChange={handleModelUpload} className="hidden" />
              </label>
           ) : (
@@ -247,9 +259,7 @@ export default function ModelTab() {
                   <FileCode className="w-5 h-5 text-green-600"/>
                   <div className="text-left flex-1">
                     <div className="font-bold text-sm">Model Loaded</div>
-                    <div className="text-xs opacity-70">
-                        {isAutoConfigured ? "✨ Auto-Configured" : "⚠️ Manual Config"}
-                    </div>
+                    <div className="text-xs opacity-70">{configStatus}</div>
                   </div>
                   <button onClick={() => setSession(null)} className="text-xs text-destructive hover:underline">Unload</button>
                </div>
@@ -257,12 +267,13 @@ export default function ModelTab() {
           )}
         </div>
 
-        {/* CONFIGURATION (Always Visible now for debugging) */}
+        {/* CONFIGURATION (Always Visible & Editable) */}
         {session && (
           <div className="bg-card border border-border rounded-lg p-4 space-y-4">
              <div className="space-y-2">
-                <div className="text-sm font-semibold flex items-center gap-2">
-                  <Settings2 className="w-4 h-4" /> Configuration
+                <div className="text-sm font-semibold flex items-center gap-2 justify-between">
+                  <div className="flex items-center gap-2"><Settings2 className="w-4 h-4" /> Configuration</div>
+                  <div className="text-[10px] text-muted-foreground bg-muted px-2 py-0.5 rounded">Editable</div>
                 </div>
                 <div className="grid grid-cols-2 gap-3">
                     <div className="space-y-1">
@@ -271,7 +282,7 @@ export default function ModelTab() {
                         type="number" 
                         value={windowSize} 
                         onChange={(e) => setWindowSize(Number(e.target.value))}
-                        className="w-full p-2 text-sm border rounded bg-background"
+                        className="w-full p-2 text-sm border rounded bg-background font-mono"
                       />
                     </div>
                     <div className="space-y-1">
@@ -314,7 +325,7 @@ export default function ModelTab() {
           </div>
         )}
 
-        {/* RESULTS CARD */}
+        {/* RESULTS */}
         {inferenceResult && (
            <div className="bg-card border border-border rounded-lg p-4 space-y-3 shadow-sm">
               <div className="flex justify-between items-center">
